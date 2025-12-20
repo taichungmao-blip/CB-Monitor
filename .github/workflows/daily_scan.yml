@@ -1,0 +1,31 @@
+name: Daily Stock Scan (TWSE/TPEX)
+
+on:
+  schedule:
+    # GitHub 使用 UTC 時間。
+    # 07:30 UTC = 17:30 台灣時間 (盤後資料通常 15:00 後齊全)
+    - cron: '30 9 * * *'
+  workflow_dispatch: # 允許手動點擊按鈕執行測試
+
+jobs:
+  run-scanner:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Scan Script
+        env:
+          # 這裡會讀取您在 GitHub 設定的 Secret
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python main.py
