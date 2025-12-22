@@ -43,7 +43,7 @@ TARGETS = [
 def send_discord(title, msg, color=0x00ff00):
     if not DISCORD_WEBHOOK_URL: return
     data = {
-        "username": "CB 戰情室 (V9.2)",
+        "username": "CB 戰情室 (V9.3)",
         "embeds": [{
             "title": title,
             "description": msg,
@@ -79,13 +79,11 @@ def get_battle_phase(eff_date):
     elif days_diff == 0: return "PHASE_2", f"🔥 **D-Day：今日生效！**"
     else: return "PHASE_3", f"🚀 **後續追蹤：第 {abs(days_diff)} 天**"
 
-# ✅ 全新功能：使用 MIS API 抓取即時/收盤價 (解決 TPEX 被擋問題)
+# ✅ MIS 系統查詢：同時抓「價格」與「成交量」
 def fetch_snapshot_prices(targets):
-    print(f"📥 正在透過 MIS 系統查詢最新報價...")
+    print(f"📥 正在透過 MIS 系統查詢最新報價與成交量...")
     price_map = {}
     
-    # 1. 組合查詢字串 (同時猜測 tse 與 otc)
-    # 格式: tse_2376.tw|otc_2745.tw|...
     query_list = []
     for t in targets:
         sid = t['id']
@@ -103,14 +101,12 @@ def fetch_snapshot_prices(targets):
         if 'msgArray' in js:
             for row in js['msgArray']:
                 try:
-                    sid = row['c'] # 股票代號
-                    
-                    # 抓取成交價 (z)，如果沒有成交價，試試看昨日收盤 (y)
+                    sid = row['c']
                     price_str = row.get('z', '-')
-                    y_str = row.get('y', '-') # 昨收
+                    y_str = row.get('y', '-')
+                    vol_str = row.get('v', '0') # ✅ 新增：累積成交量 (張)
                     
                     if price_str == '-':
-                        # 今日無成交，暫用昨收
                         price_val = float(y_str)
                         change_val = 0.0
                         pct = 0.0
@@ -123,10 +119,11 @@ def fetch_snapshot_prices(targets):
                     price_map[sid] = {
                         'close': price_val,
                         'change': change_val,
-                        'pct': pct
+                        'pct': pct,
+                        'vol': vol_str # 存起來
                     }
                 except: pass
-            print(f"   ✅ 成功取得 {len(price_map)} 檔即時報價")
+            print(f"   ✅ 成功取得 {len(price_map)} 檔報價資訊")
         else:
             print(f"   ⚠️ MIS 回傳無資料")
             
@@ -159,7 +156,7 @@ def fetch_all_chips(target_date):
     date_str = target_date.strftime("%Y%m%d")
     ts = int(time.time())
 
-    # TWSE 籌碼
+    # TWSE
     try:
         url = f"https://www.twse.com.tw/rwd/zh/fund/T86?date={date_str}&selectType=ALLBUT0999&response=json&_={ts}"
         res = session.get(url, verify=False)
@@ -174,7 +171,7 @@ def fetch_all_chips(target_date):
                 except: pass
     except: pass
 
-    # TPEX 籌碼
+    # TPEX
     try:
         if 'tpex_visited' not in session.cookies:
             session.get("https://www.tpex.org.tw/web/", verify=False)
@@ -249,19 +246,19 @@ def check_one_stock(target, all_chips, all_prices, target_date_str):
     print(f"🔎 分析 {sid} {sname}...")
     phase_code, phase_text = get_battle_phase(sdate)
     
-    # 籌碼
     f_buy = 0; t_buy = 0
     if sid in all_chips:
         f_buy = all_chips[sid]['foreign']
         t_buy = all_chips[sid]['trust']
     
-    # 股價 (從 MIS 抓到的)
+    # 處理股價與成交量
     price_info = "無報價"
     if sid in all_prices:
         p_data = all_prices[sid]
         close = p_data['close']
         change = p_data['change']
         pct = p_data['pct']
+        vol = p_data['vol'] # 取出成交量
         
         if change > 0: 
             emoji = "📈"
@@ -275,7 +272,9 @@ def check_one_stock(target, all_chips, all_prices, target_date_str):
             emoji = "➖"
             change_str = "0"
             pct_str = "0%"
-        price_info = f"{emoji} {close} ({change_str} / {pct_str})"
+        
+        # ✅ 價量顯示格式
+        price_info = f"{emoji} {close} ({change_str} / {pct_str}) | 📦 量：{vol} 張"
 
     signal, text, color = get_strategy_analysis(sstrat, f_buy, t_buy, phase_code, sthreshold)
     
@@ -292,17 +291,15 @@ def check_one_stock(target, all_chips, all_prices, target_date_str):
     send_discord(f"📊 {sname} ({sid}) 戰報", msg, color)
 
 if __name__ == "__main__":
-    print("🚀 戰情室旗艦掃描器 V9.2 (MIS 報價修復版) 啟動...")
+    print("🚀 戰情室旗艦掃描器 V9.3 (價量雙全版) 啟動...")
     target_date = get_target_date()
     target_date_str = target_date.strftime("%Y-%m-%d")
     
-    # 1. 抓籌碼
     all_chips_map = fetch_all_chips(target_date)
     if not all_chips_map:
         print("\n😴 系統偵測：今日查無籌碼資料 (休市)。休眠中。")
         exit(0)
 
-    # 2. 抓股價 (使用新版 MIS API)
     all_prices_map = fetch_snapshot_prices(TARGETS)
     
     print(f"📊 數據就緒，開始分析...")
