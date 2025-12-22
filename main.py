@@ -16,15 +16,13 @@ DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
 if not DISCORD_WEBHOOK_URL:
     print("❌ 錯誤：未設定 DISCORD_WEBHOOK_URL")
-    # exit(1) # 本地測試時可先註解此行以免直接跳出
+    # exit(1)
 
-# ✅ 瀏覽器偽裝 (全域設定)
+# ✅ 瀏覽器偽裝
 session = requests.Session()
 session.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Referer': 'https://www.tpex.org.tw/',
     'Accept': 'application/json, text/javascript, */*; q=0.01',
-    'X-Requested-With': 'XMLHttpRequest', 
     'Connection': 'keep-alive'
 })
 
@@ -45,7 +43,7 @@ TARGETS = [
 def send_discord(title, msg, color=0x00ff00):
     if not DISCORD_WEBHOOK_URL: return
     data = {
-        "username": "CB 戰情室 (V9.1)",
+        "username": "CB 戰情室 (V9.2)",
         "embeds": [{
             "title": title,
             "description": msg,
@@ -81,6 +79,62 @@ def get_battle_phase(eff_date):
     elif days_diff == 0: return "PHASE_2", f"🔥 **D-Day：今日生效！**"
     else: return "PHASE_3", f"🚀 **後續追蹤：第 {abs(days_diff)} 天**"
 
+# ✅ 全新功能：使用 MIS API 抓取即時/收盤價 (解決 TPEX 被擋問題)
+def fetch_snapshot_prices(targets):
+    print(f"📥 正在透過 MIS 系統查詢最新報價...")
+    price_map = {}
+    
+    # 1. 組合查詢字串 (同時猜測 tse 與 otc)
+    # 格式: tse_2376.tw|otc_2745.tw|...
+    query_list = []
+    for t in targets:
+        sid = t['id']
+        query_list.append(f"tse_{sid}.tw")
+        query_list.append(f"otc_{sid}.tw")
+    
+    query_str = "|".join(query_list)
+    ts = int(time.time() * 1000)
+    
+    try:
+        url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={query_str}&json=1&delay=0&_={ts}"
+        res = session.get(url, verify=False)
+        js = res.json()
+        
+        if 'msgArray' in js:
+            for row in js['msgArray']:
+                try:
+                    sid = row['c'] # 股票代號
+                    
+                    # 抓取成交價 (z)，如果沒有成交價，試試看昨日收盤 (y)
+                    price_str = row.get('z', '-')
+                    y_str = row.get('y', '-') # 昨收
+                    
+                    if price_str == '-':
+                        # 今日無成交，暫用昨收
+                        price_val = float(y_str)
+                        change_val = 0.0
+                        pct = 0.0
+                    else:
+                        price_val = float(price_str)
+                        last_close = float(y_str)
+                        change_val = price_val - last_close
+                        pct = (change_val / last_close) * 100
+                    
+                    price_map[sid] = {
+                        'close': price_val,
+                        'change': change_val,
+                        'pct': pct
+                    }
+                except: pass
+            print(f"   ✅ 成功取得 {len(price_map)} 檔即時報價")
+        else:
+            print(f"   ⚠️ MIS 回傳無資料")
+            
+    except Exception as e:
+        print(f"❌ MIS 報價錯誤: {e}")
+        
+    return price_map
+
 def check_material_info(sid, sname):
     found_news = []
     try:
@@ -99,92 +153,6 @@ def check_material_info(sid, sname):
                 break 
     except: pass
     return found_news
-
-# ✅ 修正版：抓取每日收盤行情 (修復 TPEX 上櫃報價)
-def fetch_all_prices(target_date):
-    price_map = {}
-    date_str = target_date.strftime("%Y%m%d")
-    ts = int(time.time())
-
-    # --- 1. TWSE 上市行情 ---
-    print(f"📥 下載 TWSE 股價行情...")
-    try:
-        url = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALLBUT0999&response=json&_={ts}"
-        res = session.get(url, verify=False)
-        js = res.json()
-        if js['stat'] == 'OK':
-            target_table = None
-            for table in js.get('tables', []):
-                if "收盤價" in table.get('fields', []):
-                    target_table = table
-                    break
-            
-            if target_table:
-                for row in target_table['data']:
-                    try:
-                        sid = "".join(row[0].split())
-                        close_price = row[8].replace(',', '')
-                        
-                        sign_html = row[9] 
-                        diff = row[10].replace(',', '')
-                        
-                        if "red" in sign_html: sign = 1.0
-                        elif "green" in sign_html: sign = -1.0
-                        else: sign = 0.0
-                        if "-" in sign_html: sign = -1.0 # 補強減號判斷
-                        
-                        try:
-                            price_val = float(close_price)
-                            change_val = float(diff) * sign
-                            prev_price = price_val - change_val
-                            pct = (change_val / prev_price) * 100 if prev_price != 0 else 0.0
-                            
-                            price_map[sid] = {'close': price_val, 'change': change_val, 'pct': pct}
-                        except: pass
-                    except: pass
-    except Exception as e: print(f"❌ TWSE 報價錯誤: {e}")
-
-    # --- 2. TPEX 上櫃行情 (關鍵修復) ---
-    print(f"📥 下載 TPEX 股價行情...")
-    try:
-        date_str_ro = f"{target_date.year-1911}/{target_date.month:02d}/{target_date.day:02d}"
-        # ⚠️ 關鍵：TPEX 股價 API 需要特定的 Referer，不能用首頁
-        headers_tpex_price = session.headers.copy()
-        headers_tpex_price.update({
-            'Referer': 'https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote.php'
-        })
-        
-        url = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&d={date_str_ro}&o=json&_={ts}"
-        res = session.get(url, headers=headers_tpex_price, verify=False)
-        js = res.json()
-        
-        if 'aaData' in js:
-            print(f"   ✅ TPEX 報價下載成功 (共 {len(js['aaData'])} 筆)")
-            for row in js['aaData']:
-                try:
-                    sid = "".join(row[0].split())
-                    close_price = row[2].replace(',', '')
-                    diff = row[3].replace(',', '')
-                    
-                    # 處理 "---" (無成交)
-                    if "---" in close_price: continue
-
-                    try:
-                        price_val = float(close_price)
-                        change_val = float(diff)
-                        
-                        # TPEX 的 diff 已經包含正負號
-                        prev_price = price_val - change_val
-                        pct = (change_val / prev_price) * 100 if prev_price != 0 else 0.0
-                        
-                        price_map[sid] = {'close': price_val, 'change': change_val, 'pct': pct}
-                    except: pass 
-                except: pass
-        else:
-            print(f"   ⚠️ TPEX 報價無資料 (可能是 Referer 仍被擋或休市)")
-    except Exception as e: print(f"❌ TPEX 報價錯誤: {e}")
-
-    return price_map
 
 def fetch_all_chips(target_date):
     all_data = {}
@@ -281,13 +249,13 @@ def check_one_stock(target, all_chips, all_prices, target_date_str):
     print(f"🔎 分析 {sid} {sname}...")
     phase_code, phase_text = get_battle_phase(sdate)
     
-    # 籌碼數據
+    # 籌碼
     f_buy = 0; t_buy = 0
     if sid in all_chips:
         f_buy = all_chips[sid]['foreign']
         t_buy = all_chips[sid]['trust']
     
-    # 股價數據
+    # 股價 (從 MIS 抓到的)
     price_info = "無報價"
     if sid in all_prices:
         p_data = all_prices[sid]
@@ -297,12 +265,12 @@ def check_one_stock(target, all_chips, all_prices, target_date_str):
         
         if change > 0: 
             emoji = "📈"
-            change_str = f"+{change}"
-            pct_str = f"+{pct:.1f}%"
+            change_str = f"+{change:.2f}"
+            pct_str = f"+{pct:.2f}%"
         elif change < 0: 
             emoji = "📉"
-            change_str = f"{change}"
-            pct_str = f"{pct:.1f}%"
+            change_str = f"{change:.2f}"
+            pct_str = f"{pct:.2f}%"
         else: 
             emoji = "➖"
             change_str = "0"
@@ -324,7 +292,7 @@ def check_one_stock(target, all_chips, all_prices, target_date_str):
     send_discord(f"📊 {sname} ({sid}) 戰報", msg, color)
 
 if __name__ == "__main__":
-    print("🚀 戰情室旗艦掃描器 V9.1 (上櫃報價修復版) 啟動...")
+    print("🚀 戰情室旗艦掃描器 V9.2 (MIS 報價修復版) 啟動...")
     target_date = get_target_date()
     target_date_str = target_date.strftime("%Y-%m-%d")
     
@@ -334,8 +302,8 @@ if __name__ == "__main__":
         print("\n😴 系統偵測：今日查無籌碼資料 (休市)。休眠中。")
         exit(0)
 
-    # 2. 抓股價
-    all_prices_map = fetch_all_prices(target_date)
+    # 2. 抓股價 (使用新版 MIS API)
+    all_prices_map = fetch_snapshot_prices(TARGETS)
     
     print(f"📊 數據就緒，開始分析...")
     
