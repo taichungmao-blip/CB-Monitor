@@ -11,14 +11,14 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ✅ 從環境變數讀取 Webhook
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
-# 如果是在本地端測試 (沒有環境變數)，請取消下面這行的註解並填入網址
+# 本地測試時請解除下方註解並填入網址
 # DISCORD_WEBHOOK_URL = "您的Discord_Webhook_網址"
 
 if not DISCORD_WEBHOOK_URL:
     print("❌ 錯誤：未設定 DISCORD_WEBHOOK_URL")
-    exit(1)
+    # exit(1) # 本地測試時可先註解此行以免直接跳出
 
-# ✅ 瀏覽器偽裝
+# ✅ 瀏覽器偽裝 (全域設定)
 session = requests.Session()
 session.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -43,8 +43,9 @@ TARGETS = [
 ]
 
 def send_discord(title, msg, color=0x00ff00):
+    if not DISCORD_WEBHOOK_URL: return
     data = {
-        "username": "CB 戰情室 (V9.0)",
+        "username": "CB 戰情室 (V9.1)",
         "embeds": [{
             "title": title,
             "description": msg,
@@ -99,7 +100,7 @@ def check_material_info(sid, sname):
     except: pass
     return found_news
 
-# ✅ 新增功能：抓取每日收盤行情 (TWSE + TPEX)
+# ✅ 修正版：抓取每日收盤行情 (修復 TPEX 上櫃報價)
 def fetch_all_prices(target_date):
     price_map = {}
     date_str = target_date.strftime("%Y%m%d")
@@ -112,7 +113,6 @@ def fetch_all_prices(target_date):
         res = session.get(url, verify=False)
         js = res.json()
         if js['stat'] == 'OK':
-            # TWSE 的價格資料通常在 tables[9] (但也可能變動，依欄位判斷)
             target_table = None
             for table in js.get('tables', []):
                 if "收盤價" in table.get('fields', []):
@@ -125,43 +125,50 @@ def fetch_all_prices(target_date):
                         sid = "".join(row[0].split())
                         close_price = row[8].replace(',', '')
                         
-                        # 解析漲跌 (TWSE 會把漲跌符號分開放在 row[9])
                         sign_html = row[9] 
                         diff = row[10].replace(',', '')
                         
-                        if "red" in sign_html: sign = 1.0  # 漲
-                        elif "green" in sign_html: sign = -1.0 # 跌
-                        else: sign = 0.0 # 平盤 (或無顏色)
-                        
-                        # 如果是減號，但沒顏色，有時是特殊符號
-                        if "-" in sign_html: sign = -1.0
+                        if "red" in sign_html: sign = 1.0
+                        elif "green" in sign_html: sign = -1.0
+                        else: sign = 0.0
+                        if "-" in sign_html: sign = -1.0 # 補強減號判斷
                         
                         try:
                             price_val = float(close_price)
                             change_val = float(diff) * sign
-                            # 計算漲跌幅
                             prev_price = price_val - change_val
                             pct = (change_val / prev_price) * 100 if prev_price != 0 else 0.0
                             
                             price_map[sid] = {'close': price_val, 'change': change_val, 'pct': pct}
-                        except: pass # 可能遇到 "--"
+                        except: pass
                     except: pass
-    except: pass
+    except Exception as e: print(f"❌ TWSE 報價錯誤: {e}")
 
-    # --- 2. TPEX 上櫃行情 ---
+    # --- 2. TPEX 上櫃行情 (關鍵修復) ---
     print(f"📥 下載 TPEX 股價行情...")
     try:
         date_str_ro = f"{target_date.year-1911}/{target_date.month:02d}/{target_date.day:02d}"
+        # ⚠️ 關鍵：TPEX 股價 API 需要特定的 Referer，不能用首頁
+        headers_tpex_price = session.headers.copy()
+        headers_tpex_price.update({
+            'Referer': 'https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote.php'
+        })
+        
         url = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&d={date_str_ro}&o=json&_={ts}"
-        res = session.get(url, verify=False)
+        res = session.get(url, headers=headers_tpex_price, verify=False)
         js = res.json()
+        
         if 'aaData' in js:
+            print(f"   ✅ TPEX 報價下載成功 (共 {len(js['aaData'])} 筆)")
             for row in js['aaData']:
                 try:
                     sid = "".join(row[0].split())
                     close_price = row[2].replace(',', '')
                     diff = row[3].replace(',', '')
                     
+                    # 處理 "---" (無成交)
+                    if "---" in close_price: continue
+
                     try:
                         price_val = float(close_price)
                         change_val = float(diff)
@@ -173,7 +180,9 @@ def fetch_all_prices(target_date):
                         price_map[sid] = {'close': price_val, 'change': change_val, 'pct': pct}
                     except: pass 
                 except: pass
-    except: pass
+        else:
+            print(f"   ⚠️ TPEX 報價無資料 (可能是 Referer 仍被擋或休市)")
+    except Exception as e: print(f"❌ TPEX 報價錯誤: {e}")
 
     return price_map
 
@@ -278,7 +287,7 @@ def check_one_stock(target, all_chips, all_prices, target_date_str):
         f_buy = all_chips[sid]['foreign']
         t_buy = all_chips[sid]['trust']
     
-    # 股價數據 (新增)
+    # 股價數據
     price_info = "無報價"
     if sid in all_prices:
         p_data = all_prices[sid]
@@ -286,7 +295,6 @@ def check_one_stock(target, all_chips, all_prices, target_date_str):
         change = p_data['change']
         pct = p_data['pct']
         
-        # 決定符號
         if change > 0: 
             emoji = "📈"
             change_str = f"+{change}"
@@ -299,7 +307,6 @@ def check_one_stock(target, all_chips, all_prices, target_date_str):
             emoji = "➖"
             change_str = "0"
             pct_str = "0%"
-            
         price_info = f"{emoji} {close} ({change_str} / {pct_str})"
 
     signal, text, color = get_strategy_analysis(sstrat, f_buy, t_buy, phase_code, sthreshold)
@@ -312,13 +319,12 @@ def check_one_stock(target, all_chips, all_prices, target_date_str):
             color = 0xff00ff
             signal = "📰 重訊發布"
     
-    # 在戰報中加入股價資訊
     msg = f"📅 **{target_date_str}**\n💰 收盤：{price_info}\n{phase_text}\n----------------\n模式：{sstrat} (門檻:{sthreshold})\n👽 外資：`{f_buy}` 張\n🏦 投信：`{t_buy}` 張\n----------------\n💡 {signal}\n📜 {text}{news_text}"
     
     send_discord(f"📊 {sname} ({sid}) 戰報", msg, color)
 
 if __name__ == "__main__":
-    print("🚀 戰情室旗艦掃描器 V9.0 (股價行情版) 啟動...")
+    print("🚀 戰情室旗艦掃描器 V9.1 (上櫃報價修復版) 啟動...")
     target_date = get_target_date()
     target_date_str = target_date.strftime("%Y-%m-%d")
     
@@ -328,7 +334,7 @@ if __name__ == "__main__":
         print("\n😴 系統偵測：今日查無籌碼資料 (休市)。休眠中。")
         exit(0)
 
-    # 2. 抓股價 (新增)
+    # 2. 抓股價
     all_prices_map = fetch_all_prices(target_date)
     
     print(f"📊 數據就緒，開始分析...")
