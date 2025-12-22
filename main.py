@@ -8,11 +8,14 @@ from bs4 import BeautifulSoup
 # 🛑 1. 系統設定區
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ✅ 從環境變數讀取 Webhook (安全性修正)
+# ✅ 從環境變數讀取 Webhook
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
+# 如果是在本地端測試 (沒有環境變數)，請取消下面這行的註解並填入網址
+# DISCORD_WEBHOOK_URL = "您的Discord_Webhook_網址"
+
 if not DISCORD_WEBHOOK_URL:
-    print("❌ 錯誤：未設定 DISCORD_WEBHOOK_URL 環境變數")
+    print("❌ 錯誤：未設定 DISCORD_WEBHOOK_URL")
     exit(1)
 
 # ✅ 瀏覽器偽裝
@@ -41,7 +44,7 @@ TARGETS = [
 
 def send_discord(title, msg, color=0x00ff00):
     data = {
-        "username": "CB 戰情室 (GitHub Action)",
+        "username": "CB 戰情室 (V9.0)",
         "embeds": [{
             "title": title,
             "description": msg,
@@ -52,7 +55,6 @@ def send_discord(title, msg, color=0x00ff00):
     try: session.post(DISCORD_WEBHOOK_URL, json=data, verify=False)
     except: pass
 
-# ✅ 強制轉換為台灣時間 (GMT+8)
 def get_tw_time():
     utc_now = datetime.now(timezone.utc)
     tw_now = utc_now.astimezone(timezone(timedelta(hours=8)))
@@ -60,7 +62,7 @@ def get_tw_time():
 
 def get_target_date():
     now = get_tw_time()
-    # 邏輯：下午 3 點 (15:00) 前執行，抓昨天；3 點後執行，抓今天
+    # 下午 3 點前抓昨天
     if now.hour < 15: 
         target = now - timedelta(days=1)
         print(f"🕒 台灣時間 {now.strftime('%H:%M')} (盤中)，自動抓取【昨天 {target.strftime('%Y-%m-%d')}】資料")
@@ -72,7 +74,6 @@ def get_target_date():
 def get_battle_phase(eff_date):
     eff_dt = datetime.strptime(eff_date, "%Y-%m-%d").replace(tzinfo=timezone(timedelta(hours=8)))
     today = get_tw_time()
-    # 只比較日期部分
     days_diff = (eff_dt.date() - today.date()).days
     
     if days_diff > 0: return "PHASE_1", f"⏳ **倒數 {days_diff} 天**"
@@ -82,12 +83,9 @@ def get_battle_phase(eff_date):
 def check_material_info(sid, sname):
     found_news = []
     try:
-        # 使用台灣時間年份
         tw_year = str(get_tw_time().year - 1911)
         url = "https://mops.twse.com.tw/mops/web/ajax_t05st01"
-        payload = {
-            'encodeURIComponent': '1', 'step': '1', 'firstin': '1', 'off': '1', 'queryName': 'co_id', 'inpuType': 'co_id', 'TYPEK': 'all', 'co_id': sid, 'year': tw_year
-        }
+        payload = {'encodeURIComponent': '1', 'step': '1', 'firstin': '1', 'off': '1', 'queryName': 'co_id', 'inpuType': 'co_id', 'TYPEK': 'all', 'co_id': sid, 'year': tw_year}
         res = session.post(url, data=payload, verify=False)
         res.encoding = 'utf8'
         soup = BeautifulSoup(res.text, 'html.parser')
@@ -101,12 +99,90 @@ def check_material_info(sid, sname):
     except: pass
     return found_news
 
+# ✅ 新增功能：抓取每日收盤行情 (TWSE + TPEX)
+def fetch_all_prices(target_date):
+    price_map = {}
+    date_str = target_date.strftime("%Y%m%d")
+    ts = int(time.time())
+
+    # --- 1. TWSE 上市行情 ---
+    print(f"📥 下載 TWSE 股價行情...")
+    try:
+        url = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALLBUT0999&response=json&_={ts}"
+        res = session.get(url, verify=False)
+        js = res.json()
+        if js['stat'] == 'OK':
+            # TWSE 的價格資料通常在 tables[9] (但也可能變動，依欄位判斷)
+            target_table = None
+            for table in js.get('tables', []):
+                if "收盤價" in table.get('fields', []):
+                    target_table = table
+                    break
+            
+            if target_table:
+                for row in target_table['data']:
+                    try:
+                        sid = "".join(row[0].split())
+                        close_price = row[8].replace(',', '')
+                        
+                        # 解析漲跌 (TWSE 會把漲跌符號分開放在 row[9])
+                        sign_html = row[9] 
+                        diff = row[10].replace(',', '')
+                        
+                        if "red" in sign_html: sign = 1.0  # 漲
+                        elif "green" in sign_html: sign = -1.0 # 跌
+                        else: sign = 0.0 # 平盤 (或無顏色)
+                        
+                        # 如果是減號，但沒顏色，有時是特殊符號
+                        if "-" in sign_html: sign = -1.0
+                        
+                        try:
+                            price_val = float(close_price)
+                            change_val = float(diff) * sign
+                            # 計算漲跌幅
+                            prev_price = price_val - change_val
+                            pct = (change_val / prev_price) * 100 if prev_price != 0 else 0.0
+                            
+                            price_map[sid] = {'close': price_val, 'change': change_val, 'pct': pct}
+                        except: pass # 可能遇到 "--"
+                    except: pass
+    except: pass
+
+    # --- 2. TPEX 上櫃行情 ---
+    print(f"📥 下載 TPEX 股價行情...")
+    try:
+        date_str_ro = f"{target_date.year-1911}/{target_date.month:02d}/{target_date.day:02d}"
+        url = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&d={date_str_ro}&o=json&_={ts}"
+        res = session.get(url, verify=False)
+        js = res.json()
+        if 'aaData' in js:
+            for row in js['aaData']:
+                try:
+                    sid = "".join(row[0].split())
+                    close_price = row[2].replace(',', '')
+                    diff = row[3].replace(',', '')
+                    
+                    try:
+                        price_val = float(close_price)
+                        change_val = float(diff)
+                        
+                        # TPEX 的 diff 已經包含正負號
+                        prev_price = price_val - change_val
+                        pct = (change_val / prev_price) * 100 if prev_price != 0 else 0.0
+                        
+                        price_map[sid] = {'close': price_val, 'change': change_val, 'pct': pct}
+                    except: pass 
+                except: pass
+    except: pass
+
+    return price_map
+
 def fetch_all_chips(target_date):
     all_data = {}
     date_str = target_date.strftime("%Y%m%d")
     ts = int(time.time())
 
-    print(f"📥 下載 TWSE (上市) 資料...")
+    # TWSE 籌碼
     try:
         url = f"https://www.twse.com.tw/rwd/zh/fund/T86?date={date_str}&selectType=ALLBUT0999&response=json&_={ts}"
         res = session.get(url, verify=False)
@@ -121,21 +197,18 @@ def fetch_all_chips(target_date):
                 except: pass
     except: pass
 
-    print(f"📥 下載 TPEX (上櫃) 資料...")
+    # TPEX 籌碼
     try:
         if 'tpex_visited' not in session.cookies:
             session.get("https://www.tpex.org.tw/web/", verify=False)
             session.cookies.set('tpex_visited', 'true')
-        
         date_str_ro = f"{target_date.year-1911}/{target_date.month:02d}/{target_date.day:02d}"
         url = f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&o=json&se=AL&t=D&d={date_str_ro}&_={ts}"
         res = session.get(url, verify=False)
         js = res.json()
-        
         data_list = []
         if 'tables' in js and len(js['tables']) > 0: data_list = js['tables'][0]['data']
         elif 'aaData' in js: data_list = js['aaData']
-
         for row in data_list:
             try:
                 sid = "".join(row[0].split())
@@ -189,7 +262,7 @@ def get_strategy_analysis(strategy, foreign, trust, phase_code, threshold):
 
     return signal, text, color
 
-def check_one_stock(target, all_chips, target_date_str):
+def check_one_stock(target, all_chips, all_prices, target_date_str):
     sid = target['id']
     sname = target['name']
     sdate = target['date']
@@ -199,11 +272,36 @@ def check_one_stock(target, all_chips, target_date_str):
     print(f"🔎 分析 {sid} {sname}...")
     phase_code, phase_text = get_battle_phase(sdate)
     
+    # 籌碼數據
     f_buy = 0; t_buy = 0
     if sid in all_chips:
         f_buy = all_chips[sid]['foreign']
         t_buy = all_chips[sid]['trust']
     
+    # 股價數據 (新增)
+    price_info = "無報價"
+    if sid in all_prices:
+        p_data = all_prices[sid]
+        close = p_data['close']
+        change = p_data['change']
+        pct = p_data['pct']
+        
+        # 決定符號
+        if change > 0: 
+            emoji = "📈"
+            change_str = f"+{change}"
+            pct_str = f"+{pct:.1f}%"
+        elif change < 0: 
+            emoji = "📉"
+            change_str = f"{change}"
+            pct_str = f"{pct:.1f}%"
+        else: 
+            emoji = "➖"
+            change_str = "0"
+            pct_str = "0%"
+            
+        price_info = f"{emoji} {close} ({change_str} / {pct_str})"
+
     signal, text, color = get_strategy_analysis(sstrat, f_buy, t_buy, phase_code, sthreshold)
     
     news_list = check_material_info(sid, sname)
@@ -214,23 +312,28 @@ def check_one_stock(target, all_chips, target_date_str):
             color = 0xff00ff
             signal = "📰 重訊發布"
     
-    msg = f"📅 **資料日期：{target_date_str}**\n{phase_text}\n----------------\n模式：{sstrat} (門檻:{sthreshold})\n👽 外資：`{f_buy}` 張\n🏦 投信：`{t_buy}` 張\n----------------\n💡 {signal}\n📜 {text}{news_text}"
+    # 在戰報中加入股價資訊
+    msg = f"📅 **{target_date_str}**\n💰 收盤：{price_info}\n{phase_text}\n----------------\n模式：{sstrat} (門檻:{sthreshold})\n👽 外資：`{f_buy}` 張\n🏦 投信：`{t_buy}` 張\n----------------\n💡 {signal}\n📜 {text}{news_text}"
+    
     send_discord(f"📊 {sname} ({sid}) 戰報", msg, color)
 
 if __name__ == "__main__":
-    print("🚀 戰情室旗艦掃描器 (GitHub Action版) 啟動...")
+    print("🚀 戰情室旗艦掃描器 V9.0 (股價行情版) 啟動...")
     target_date = get_target_date()
     target_date_str = target_date.strftime("%Y-%m-%d")
     
+    # 1. 抓籌碼
     all_chips_map = fetch_all_chips(target_date)
-    
     if not all_chips_map:
-        print("\n😴 系統偵測：今日查無資料 (週末/假日)。休眠中。")
+        print("\n😴 系統偵測：今日查無籌碼資料 (休市)。休眠中。")
         exit(0)
-        
-    print(f"📊 成功獲取 {len(all_chips_map)} 筆籌碼資料，開始分析...")
+
+    # 2. 抓股價 (新增)
+    all_prices_map = fetch_all_prices(target_date)
+    
+    print(f"📊 數據就緒，開始分析...")
     
     for target in TARGETS:
-        check_one_stock(target, all_chips_map, target_date_str)
+        check_one_stock(target, all_chips_map, all_prices_map, target_date_str)
         time.sleep(1)
     print("✅ 完成！")
