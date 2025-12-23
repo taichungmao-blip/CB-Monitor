@@ -26,24 +26,32 @@ session.headers.update({
     'Connection': 'keep-alive'
 })
 
-# 🛑 2. 監控目標清單
+# 🛑 2. 監控目標清單 (V9.6 新增穎崴)
 TARGETS = [
+    # --- 2026 1月生效主力 (超級星期四 1/9) ---
+    {"id": "6515", "name": "穎崴",     "date": "2026-01-09", "strategy": "STD", "threshold": 50},  # NEW! 2500元高價股，門檻50張(=1.3億)
+    {"id": "2329", "name": "華泰",     "date": "2026-01-09", "strategy": "STD", "threshold": 500},
+    {"id": "4923", "name": "力士",     "date": "2026-01-09", "strategy": "STD", "threshold": 100},
+
+    # --- 1月其他 ---
     {"id": "2376", "name": "技嘉",     "date": "2026-01-02", "strategy": "ECB", "threshold": 500},
     {"id": "2455", "name": "全新",     "date": "2026-01-02", "strategy": "STD", "threshold": 200},
     {"id": "4714", "name": "永捷",     "date": "2026-01-16", "strategy": "STD", "threshold": 100},
+    {"id": "6101", "name": "寬魚國際", "date": "2026-01-07", "strategy": "ENT", "threshold": 100}, 
+    {"id": "2745", "name": "五福",     "date": "2026-01-10", "strategy": "PRICED", "threshold": 100}, 
+
+    # --- 2025 12月底衝刺 ---
     {"id": "2233", "name": "宇隆",     "date": "2025-12-31", "strategy": "STD", "threshold": 150},
     {"id": "6672", "name": "F-騰輝",   "date": "2025-12-30", "strategy": "STD", "threshold": 100},
     {"id": "6603", "name": "富強鑫",   "date": "2025-12-29", "strategy": "STD", "threshold": 100},
     {"id": "8210", "name": "勤誠",     "date": "2025-12-26", "strategy": "STD", "threshold": 300},
     {"id": "3706", "name": "神達",     "date": "2025-12-23", "strategy": "ECB", "threshold": 1000},
-    {"id": "6101", "name": "寬魚國際", "date": "2026-01-07", "strategy": "ENT", "threshold": 100}, 
-    {"id": "2745", "name": "五福",     "date": "2026-01-10", "strategy": "PRICED", "threshold": 100}, 
 ]
 
 def send_discord(title, msg, color=0x00ff00):
     if not DISCORD_WEBHOOK_URL: return
     data = {
-        "username": "CB 戰情室 (V9.3)",
+        "username": "CB 戰情室 (V9.6)",
         "embeds": [{
             "title": title,
             "description": msg,
@@ -79,7 +87,7 @@ def get_battle_phase(eff_date):
     elif days_diff == 0: return "PHASE_2", f"🔥 **D-Day：今日生效！**"
     else: return "PHASE_3", f"🚀 **後續追蹤：第 {abs(days_diff)} 天**"
 
-# ✅ MIS 系統查詢：同時抓「價格」與「成交量」
+# ✅ MIS 系統查詢：抓取「價格」與「成交量」
 def fetch_snapshot_prices(targets):
     print(f"📥 正在透過 MIS 系統查詢最新報價與成交量...")
     price_map = {}
@@ -104,7 +112,7 @@ def fetch_snapshot_prices(targets):
                     sid = row['c']
                     price_str = row.get('z', '-')
                     y_str = row.get('y', '-')
-                    vol_str = row.get('v', '0') # ✅ 新增：累積成交量 (張)
+                    vol_str = row.get('v', '0')
                     
                     if price_str == '-':
                         price_val = float(y_str)
@@ -120,7 +128,7 @@ def fetch_snapshot_prices(targets):
                         'close': price_val,
                         'change': change_val,
                         'pct': pct,
-                        'vol': vol_str # 存起來
+                        'vol': vol_str
                     }
                 except: pass
             print(f"   ✅ 成功取得 {len(price_map)} 檔報價資訊")
@@ -246,19 +254,20 @@ def check_one_stock(target, all_chips, all_prices, target_date_str):
     print(f"🔎 分析 {sid} {sname}...")
     phase_code, phase_text = get_battle_phase(sdate)
     
+    # 籌碼
     f_buy = 0; t_buy = 0
     if sid in all_chips:
         f_buy = all_chips[sid]['foreign']
         t_buy = all_chips[sid]['trust']
     
-    # 處理股價與成交量
+    # 報價
     price_info = "無報價"
     if sid in all_prices:
         p_data = all_prices[sid]
         close = p_data['close']
         change = p_data['change']
         pct = p_data['pct']
-        vol = p_data['vol'] # 取出成交量
+        vol = p_data['vol']
         
         if change > 0: 
             emoji = "📈"
@@ -273,7 +282,6 @@ def check_one_stock(target, all_chips, all_prices, target_date_str):
             change_str = "0"
             pct_str = "0%"
         
-        # ✅ 價量顯示格式
         price_info = f"{emoji} {close} ({change_str} / {pct_str}) | 📦 量：{vol} 張"
 
     signal, text, color = get_strategy_analysis(sstrat, f_buy, t_buy, phase_code, sthreshold)
@@ -291,15 +299,17 @@ def check_one_stock(target, all_chips, all_prices, target_date_str):
     send_discord(f"📊 {sname} ({sid}) 戰報", msg, color)
 
 if __name__ == "__main__":
-    print("🚀 戰情室旗艦掃描器 V9.3 (價量雙全版) 啟動...")
+    print("🚀 戰情室旗艦掃描器 V9.6 (AI千金股加入版) 啟動...")
     target_date = get_target_date()
     target_date_str = target_date.strftime("%Y-%m-%d")
     
+    # 1. 抓籌碼
     all_chips_map = fetch_all_chips(target_date)
     if not all_chips_map:
         print("\n😴 系統偵測：今日查無籌碼資料 (休市)。休眠中。")
         exit(0)
 
+    # 2. 抓報價
     all_prices_map = fetch_snapshot_prices(TARGETS)
     
     print(f"📊 數據就緒，開始分析...")
