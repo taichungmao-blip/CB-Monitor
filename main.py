@@ -1,6 +1,7 @@
 import os
 import requests
 import time
+import re
 import urllib3
 from datetime import datetime, timedelta, timezone
 from bs4 import BeautifulSoup
@@ -16,41 +17,51 @@ session.headers.update({
     'Connection': 'keep-alive'
 })
 
-# 🛑 2. 監控目標清單
+# 🛑 2. 監控目標清單 (V10.5 - 精準標記上市櫃)
+# mkt: 'tse' (上市), 'otc' (上櫃)
 TARGETS = [
     # --- 🔥 2026 1月生效 ---
-    {"id": "6894", "name": "衛司特",   "date": "2026-01-13", "strategy": "STD", "threshold": 50},
-    {"id": "6913", "name": "鴻呈",     "date": "2026-01-13", "strategy": "STD", "threshold": 100},
-    {"id": "2324", "name": "仁寶",     "date": "2026-01-12", "strategy": "ECB", "threshold": 1000},
-    {"id": "3587", "name": "閎康",     "date": "2026-01-12", "strategy": "STD", "threshold": 150},
-    {"id": "6515", "name": "穎崴",     "date": "2026-01-09", "strategy": "STD", "threshold": 50},
-    {"id": "2329", "name": "華泰",     "date": "2026-01-09", "strategy": "STD", "threshold": 500},
-    {"id": "4923", "name": "力士",     "date": "2026-01-09", "strategy": "STD", "threshold": 100},
+    {"id": "6894", "name": "衛司特",   "date": "2026-01-13", "strategy": "STD", "threshold": 50,  "mkt": "otc"},
+    {"id": "6913", "name": "鴻呈",     "date": "2026-01-13", "strategy": "STD", "threshold": 100, "mkt": "otc"},
+    {"id": "2324", "name": "仁寶",     "date": "2026-01-12", "strategy": "ECB", "threshold": 1000,"mkt": "tse"},
+    {"id": "3587", "name": "閎康",     "date": "2026-01-12", "strategy": "STD", "threshold": 150, "mkt": "otc"},
+    {"id": "6515", "name": "穎崴",     "date": "2026-01-09", "strategy": "STD", "threshold": 50,  "mkt": "tse"},
+    {"id": "2329", "name": "華泰",     "date": "2026-01-09", "strategy": "STD", "threshold": 500, "mkt": "tse"},
+    {"id": "4923", "name": "力士",     "date": "2026-01-09", "strategy": "STD", "threshold": 100, "mkt": "otc"},
 
     # --- 1月初生效 ---
-    {"id": "2376", "name": "技嘉",     "date": "2026-01-02", "strategy": "ECB", "threshold": 500},
-    {"id": "2455", "name": "全新",     "date": "2026-01-02", "strategy": "STD", "threshold": 200},
-    {"id": "4714", "name": "永捷",     "date": "2026-01-16", "strategy": "STD", "threshold": 100},
-    {"id": "6101", "name": "寬魚國際", "date": "2026-01-07", "strategy": "ENT", "threshold": 100}, 
-    {"id": "2745", "name": "五福",     "date": "2026-01-10", "strategy": "PRICED", "threshold": 100}, 
+    {"id": "2376", "name": "技嘉",     "date": "2026-01-02", "strategy": "ECB", "threshold": 500, "mkt": "tse"},
+    {"id": "2455", "name": "全新",     "date": "2026-01-02", "strategy": "STD", "threshold": 200, "mkt": "tse"},
+    {"id": "4714", "name": "永捷",     "date": "2026-01-16", "strategy": "STD", "threshold": 100, "mkt": "otc"},
+    {"id": "6101", "name": "寬魚國際", "date": "2026-01-07", "strategy": "ENT", "threshold": 100, "mkt": "otc"}, 
+    {"id": "2745", "name": "五福",     "date": "2026-01-10", "strategy": "PRICED", "threshold": 100,"mkt": "otc"}, 
 
     # --- 2025 12月底衝刺 ---
-    {"id": "2233", "name": "宇隆",     "date": "2025-12-31", "strategy": "STD", "threshold": 150},
-    {"id": "6672", "name": "F-騰輝",   "date": "2025-12-30", "strategy": "STD", "threshold": 100},
-    {"id": "6603", "name": "富強鑫",   "date": "2025-12-29", "strategy": "STD", "threshold": 100},
-    {"id": "8210", "name": "勤誠",     "date": "2025-12-26", "strategy": "STD", "threshold": 300},
-    {"id": "3706", "name": "神達",     "date": "2025-12-23", "strategy": "ECB", "threshold": 1000},
+    {"id": "2233", "name": "宇隆",     "date": "2025-12-31", "strategy": "STD", "threshold": 150, "mkt": "tse"},
+    {"id": "6672", "name": "F-騰輝",   "date": "2025-12-30", "strategy": "STD", "threshold": 100, "mkt": "tse"},
+    {"id": "6603", "name": "富強鑫",   "date": "2025-12-29", "strategy": "STD", "threshold": 100, "mkt": "tse"},
+    {"id": "8210", "name": "勤誠",     "date": "2025-12-26", "strategy": "STD", "threshold": 300, "mkt": "tse"},
+    {"id": "3706", "name": "神達",     "date": "2025-12-23", "strategy": "ECB", "threshold": 1000,"mkt": "tse"},
 ]
 
 def send_discord(title, msg, color=0x00ff00):
     if not DISCORD_WEBHOOK_URL: return
-    data = {"username": "CB 戰情室 (V10.6)", "embeds": [{"title": title, "description": msg, "color": color, "timestamp": datetime.now().isoformat()}]}
+    data = {
+        "username": "CB 戰情室 (V10.5)",
+        "embeds": [{
+            "title": title,
+            "description": msg,
+            "color": color,
+            "timestamp": datetime.now().isoformat()
+        }]
+    }
     try: session.post(DISCORD_WEBHOOK_URL, json=data, verify=False)
     except: pass
 
 def get_tw_time():
     utc_now = datetime.now(timezone.utc)
-    return utc_now.astimezone(timezone(timedelta(hours=8)))
+    tw_now = utc_now.astimezone(timezone(timedelta(hours=8)))
+    return tw_now
 
 def get_target_date():
     now = get_tw_time()
@@ -70,98 +81,92 @@ def get_battle_phase(eff_date):
     elif days_diff == 0: return "PHASE_2", f"🔥 **D-Day：今日生效！**"
     else: return "PHASE_3", f"🚀 **後續追蹤：第 {abs(days_diff)} 天**"
 
-# 1. MIS 查價 (基礎數據)
-def fetch_mis_prices(targets):
-    print(f"   ⚡ 啟動 MIS 即時查價...")
-    price_map = {}
-    chunk_size = 20
-    all_queries = []
-    temp_q = []
-    for t in targets:
-        temp_q.append(f"tse_{t['id']}.tw"); temp_q.append(f"otc_{t['id']}.tw")
-        if len(temp_q) >= chunk_size: all_queries.append("|".join(temp_q)); temp_q = []
-    if temp_q: all_queries.append("|".join(temp_q))
-    ts = int(time.time() * 1000)
-    for q_str in all_queries:
-        try:
-            url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={q_str}&json=1&delay=0&_={ts}"
-            res = session.get(url, verify=False)
-            js = res.json()
-            if 'msgArray' in js:
-                for row in js['msgArray']:
-                    sid = row['c']
-                    price_str = row.get('z', '-'); y_str = row.get('y', '-'); vol_str = row.get('v', '0')
-                    if price_str == '-': price_val = float(y_str); change_val = 0.0; pct = 0.0
-                    else: price_val = float(price_str); last_close = float(y_str); change_val = price_val - last_close; pct = (change_val / last_close) * 100
-                    price_map[sid] = {'close': price_val, 'change': change_val, 'pct': pct, 'vol': vol_str, 'src': 'MIS'}
-        except: pass
-    return price_map
-
-# 2. 官方表查價 (精準修正)
-def fetch_official_close_prices(target_date):
-    print(f"   📜 啟動 官方結算報價...")
-    price_map = {}
-    date_str = target_date.strftime("%Y%m%d"); ts = int(time.time())
-    
-    # TWSE (上市)
+# ✅ 引擎二：Yahoo 股市救援 (當 MIS 失敗時啟動)
+def fetch_yahoo_price_fallback(sid):
     try:
-        url = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALLBUT0999&response=json&_={ts}"
-        res = session.get(url, verify=False); js = res.json()
-        if js['stat'] == 'OK':
-            target_table = None
-            for table in js.get('tables', []):
-                if "收盤價" in table.get('fields', []): target_table = table; break
-            if target_table:
-                for row in target_table['data']:
-                    sid = row[0]
-                    if len(sid) > 4: continue
-                    try:
-                        close = float(row[8].replace(',', ''))
-                        sign = 1.0 if "red" in row[9] else (-1.0 if "green" in row[9] else 0.0)
-                        if "-" in row[9]: sign = -1.0 
-                        diff = float(row[10].replace(',', '')) * sign
-                        vol = int(row[2].replace(',', '')) // 1000 
-                        prev = close - diff; pct = (diff / prev) * 100 if prev != 0 else 0.0
-                        price_map[sid] = {'close': close, 'change': diff, 'pct': pct, 'vol': vol, 'src': 'TWSE'}
-                    except: pass
+        url = f"https://tw.stock.yahoo.com/quote/{sid}"
+        res = session.get(url, verify=False, timeout=5)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        # 抓取股價 (Yahoo 結構常變，用正則抓大字體數字比較穩)
+        # 通常股價會在 Fz(32px) 這種 class 裡
+        price_tag = soup.find('span', class_=re.compile("Fz\(32px\)"))
+        if price_tag:
+            price_val = float(price_tag.text.replace(',', ''))
+            
+            # 嘗試抓漲跌
+            change_tag = soup.find('span', class_=re.compile("Fz\(20px\)"))
+            change_val = 0.0
+            if change_tag:
+                # 這裡可能包含 % 或 數值，簡單處理
+                try: change_txt = change_tag.text.replace('▼', '-').replace('▲', '').replace('%', '').strip(); change_val = float(change_txt)
+                except: pass
+            
+            return {'close': price_val, 'change': 0.0, 'pct': 0.0, 'vol': 'Yahoo'}
     except: pass
+    return None
+
+# ✅ 引擎一：MIS 精準查詢
+def fetch_mis_prices(targets):
+    print(f"📥 正在透過 MIS 系統查詢 (精準模式)...")
+    price_map = {}
     
-    # TPEX (上櫃) - 修正解析邏輯
+    # 初始化 Session
     try:
-        date_str_ro = f"{target_date.year-1911}/{target_date.month:02d}/{target_date.day:02d}"
-        headers = session.headers.copy(); headers['Referer'] = 'https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote.php'
-        url = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&d={date_str_ro}&o=json&_={ts}"
-        res = session.get(url, headers=headers, verify=False); js = res.json()
-        if 'aaData' in js:
-            for row in js['aaData']:
-                sid = row[0]
-                if len(sid) > 4: continue
+        session.get("https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw", timeout=5)
+    except: pass
+
+    query_list = []
+    for t in targets:
+        # ⚠️ 關鍵修正：只請求正確的市場代號，不亂猜
+        key = f"{t['mkt']}_{t['id']}.tw"
+        query_list.append(key)
+    
+    query_str = "|".join(query_list)
+    ts = int(time.time() * 1000)
+    
+    try:
+        # 加上 Referer 騙過防火牆
+        headers = {'Referer': 'https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw'}
+        url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={query_str}&json=1&delay=0&_={ts}"
+        res = session.get(url, headers=headers, verify=False)
+        js = res.json()
+        
+        if 'msgArray' in js:
+            for row in js['msgArray']:
                 try:
-                    if '---' in row[2]: continue # 避開無報價
-                    close = float(row[2].replace(',', '')); diff = float(row[3].replace(',', ''))
-                    vol = int(row[8].replace(',', '')) // 1000
-                    prev = close - diff; pct = (diff / prev) * 100 if prev != 0 else 0.0
-                    price_map[sid] = {'close': close, 'change': diff, 'pct': pct, 'vol': vol, 'src': 'TPEX'}
+                    sid = row['c']
+                    price_str = row.get('z', '-')
+                    y_str = row.get('y', '-')
+                    vol_str = row.get('v', '0')
+                    
+                    if price_str == '-':
+                        if y_str != '-': price_val = float(y_str); change_val = 0.0; pct = 0.0
+                        else: continue
+                    else:
+                        price_val = float(price_str); last_close = float(y_str)
+                        change_val = price_val - last_close
+                        pct = (change_val / last_close) * 100
+                    
+                    price_map[sid] = {'close': price_val, 'change': change_val, 'pct': pct, 'vol': vol_str}
                 except: pass
     except: pass
     return price_map
 
-def get_best_prices(targets, target_date):
-    # 1. 基礎：先抓 MIS
-    mis_prices = fetch_mis_prices(targets)
+# ✅ 智能整合：MIS + Yahoo 雙保險
+def get_combined_prices(targets):
+    # 1. 主力：MIS
+    prices = fetch_mis_prices(targets)
     
-    # 2. 進階：盤後用官方表覆蓋
-    if get_tw_time().hour >= 15:
-        official_prices = fetch_official_close_prices(target_date)
-        if official_prices:
-            print(f"   ✨ 官方報價取得成功，進行校正...")
-            # 只覆蓋有抓到的資料，沒抓到的(如TPEX失敗)保留MIS資料
-            for sid, data in official_prices.items():
-                mis_prices[sid] = data
-        else:
-            print("   ⚠️ 官方表無回應，維持使用 MIS 數據。")
-            
-    return mis_prices
+    # 2. 救援：檢查誰沒抓到，用 Yahoo 補
+    for t in targets:
+        sid = t['id']
+        if sid not in prices:
+            print(f"   ⚠️ {t['name']}({sid}) MIS 無資料，啟動 Yahoo 救援...")
+            y_data = fetch_yahoo_price_fallback(sid)
+            if y_data:
+                prices[sid] = y_data
+                
+    return prices
 
 def check_material_info(sid, sname):
     found_news = []
@@ -175,79 +180,84 @@ def check_material_info(sid, sname):
         keywords = ["轉換價格", "訂價", "競價拍賣", "生效", "上櫃", "掛牌", "海外", "Euro", "擔保"]
         for row in soup.find_all('tr'):
             text = row.text.strip()
-            if any(k in text for k in keywords): clean_text = " ".join(text.split()); found_news.append(clean_text[:80] + "..."); break 
+            if any(k in text for k in keywords):
+                clean_text = " ".join(text.split())
+                found_news.append(clean_text[:80] + "...")
+                break 
     except: pass
     return found_news
 
 def fetch_all_chips(target_date):
     all_data = {}
-    date_str = target_date.strftime("%Y%m%d"); ts = int(time.time())
+    date_str = target_date.strftime("%Y%m%d")
+    ts = int(time.time())
     # TWSE
     try:
         url = f"https://www.twse.com.tw/rwd/zh/fund/T86?date={date_str}&selectType=ALLBUT0999&response=json&_={ts}"
-        res = session.get(url, verify=False); js = res.json()
+        res = session.get(url, verify=False)
+        js = res.json()
         if js['stat'] == 'OK':
             for row in js['data']:
                 try:
-                    sid = "".join(row[0].split()); f_net = int(row[4].replace(',', '')) // 1000; t_net = int(row[10].replace(',', '')) // 1000
+                    sid = "".join(row[0].split())
+                    f_net = int(row[4].replace(',', '')) // 1000
+                    t_net = int(row[10].replace(',', '')) // 1000
                     all_data[sid] = {'foreign': f_net, 'trust': t_net}
                 except: pass
     except: pass
-    # TPEX - 修正錯誤覆蓋問題
+    # TPEX
     try:
-        if 'tpex_visited' not in session.cookies: session.get("https://www.tpex.org.tw/web/", verify=False); session.cookies.set('tpex_visited', 'true')
+        if 'tpex_visited' not in session.cookies:
+            session.get("https://www.tpex.org.tw/web/", verify=False)
+            session.cookies.set('tpex_visited', 'true')
         date_str_ro = f"{target_date.year-1911}/{target_date.month:02d}/{target_date.day:02d}"
         url = f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&o=json&se=AL&t=D&d={date_str_ro}&_={ts}"
-        res = session.get(url, verify=False); js = res.json()
+        res = session.get(url, verify=False)
+        js = res.json()
         data_list = []
         if 'tables' in js and len(js['tables']) > 0: data_list = js['tables'][0]['data']
         elif 'aaData' in js: data_list = js['aaData']
-        
         for row in data_list:
-            sid = "".join(row[0].split())
-            got_data = False
-            # 優先嘗試完整格式 (Col 10=外資, 13=投信)
             try:
-                if len(row) > 13:
-                    f_net = int(row[10].replace(',', '')) // 1000; t_net = int(row[13].replace(',', '')) // 1000
-                    all_data[sid] = {'foreign': f_net, 'trust': t_net}
-                    got_data = True
+                sid = "".join(row[0].split())
+                if len(row) > 13: 
+                    f_net = int(row[10].replace(',', '')) // 1000
+                    t_net = int(row[13].replace(',', '')) // 1000
+                else: 
+                    f_net = int(row[7].replace(',', '')) // 1000
+                    t_net = int(row[10].replace(',', '')) // 1000
+                all_data[sid] = {'foreign': f_net, 'trust': t_net}
             except: pass
-            
-            # 如果上面失敗，才嘗試舊格式 (Col 7=外資, 10=投信)
-            if not got_data:
-                try:
-                    f_net = int(row[7].replace(',', '')) // 1000; t_net = int(row[10].replace(',', '')) // 1000
-                    all_data[sid] = {'foreign': f_net, 'trust': t_net}
-                except: pass
     except: pass
     return all_data
 
+# ✅ 策略邏輯 (V10.5 權重確認版)
 def get_strategy_analysis(strategy, foreign, trust, phase_code, threshold):
     signal, text, color = "無訊號", "持續觀察", 0x808080
     limit = threshold if threshold else 500
 
-    # 1. 土洋對作
+    # 1. 優先判斷土洋對作
     if (foreign > limit and trust < -limit) or (foreign < -limit and trust > limit):
-        signal = "⚔️ 土洋對作"
-        text = f"外資與投信方向相反且金額巨大(>{limit})，籌碼混亂。"
-        color = 0xffa500 
+        signal = "⚔️ 土洋對作"; text = f"外資與投信方向相反且金額巨大(>{limit})，籌碼混亂。"; color = 0xffa500
         return signal, text, color
 
-    # 2. 策略
     if strategy == "STD": 
         if phase_code == "PHASE_1":
+            # 優先權 2：外資大賣 (權重高於投信小買) -> 修復全新(2455)誤判
             if foreign < -limit: 
-                signal = "🛡️ 外資調節"; text = f"外資賣超逾 {limit} 張，賣壓沉重。"; color = 0x808080
+                signal = "🛡️ 外資調節"; text = f"外資賣超逾 {limit} 張，短線有壓，需留意回檔。"; color = 0x808080
+            # 優先權 3：投信買 (且外資沒大賣)
             elif trust > 10: 
-                signal = "🔥 投信佈局"; text = "生效前夕投信買超，籌碼相對安定。"; color = 0xffa500
+                signal = "🔥 投信佈局"; text = "生效前夕投信買超，看好定價行情。"; color = 0xffa500
             elif foreign > limit: 
                 signal = "💹 外資補貨"; text = "外資主力進場，籌碼轉強。"; color = 0x00ffff 
             else:
-                signal = "👀 盤整觀望"; text = "法人動作未達攻擊量。"; color = 0x808080
+                signal = "👀 盤整觀望"; text = "法人動作未達攻擊量，持續觀察。"; color = 0x808080
+        
         elif phase_code in ["PHASE_2", "PHASE_3"]:
             if trust > 0 or foreign > limit: 
                 signal = "🚀 定價攻勢"; text = "法人大單敲進，全力衝刺競拍價格。"; color = 0x00ff00
+            
     elif strategy == "ECB": 
         if phase_code in ["PHASE_1", "PHASE_2"]:
             if foreign < -limit: 
@@ -258,26 +268,19 @@ def get_strategy_analysis(strategy, foreign, trust, phase_code, threshold):
                 signal = "⚖️ 多空平衡"; text = "外資無明顯避險或拉抬動作。"; color = 0xcccccc 
         elif phase_code == "PHASE_3" and foreign > limit: 
             signal = "🚀 認錯回補"; text = "訂價完成，避險空單回補。"; color = 0x00ff00
+            
     elif strategy == "ENT":
         if abs(foreign) > 20 or abs(trust) > 5: signal = "🎭 籌碼波動"; text = "法人進出，留意消息面。"; color = 0xff00ff
-    
-    # ✅ 修正：投信也必須遵守 limit 門檻
+
     elif strategy == "PRICED": 
-        if foreign > limit or trust > limit: 
-            signal = "💹 溢價護盤"; text = "掛牌前夕法人買進。"; color = 0x00ff00
-        elif foreign < -limit: 
-            signal = "⚠️ 獲利調節"; text = "掛牌前外資轉賣，留意回檔。"; color = 0xffa500
-        else:
-            signal = "👀 盤整觀望"; text = "法人買賣超未達門檻，持續觀察。"; color = 0x808080
-            
+        if foreign > 0 or trust > 0: signal = "💹 溢價護盤"; text = "掛牌前夕法人買進。"; color = 0x00ff00
+        elif foreign < -10: signal = "⚠️ 獲利調節"; text = "掛牌前外資轉賣，留意回檔。"; color = 0xffa500
+
     return signal, text, color
 
 def check_one_stock(target, all_chips, all_prices, target_date_str):
-    sid = target['id']
-    sname = target['name']
-    sdate = target['date']
-    sstrat = target['strategy']
-    sthreshold = target.get('threshold', 500)
+    sid = target['id']; sname = target['name']
+    sdate = target['date']; sstrat = target['strategy']; sthreshold = target.get('threshold', 500)
     
     print(f"🔎 分析 {sid} {sname}...")
     phase_code, phase_text = get_battle_phase(sdate)
@@ -289,11 +292,10 @@ def check_one_stock(target, all_chips, all_prices, target_date_str):
     if sid in all_prices:
         p_data = all_prices[sid]
         close = p_data['close']; change = p_data['change']; pct = p_data['pct']; vol = p_data['vol']
-        src = p_data.get('src', 'MIS')
         if change > 0: emoji = "📈"; change_str = f"+{change:.2f}"; pct_str = f"+{pct:.2f}%"
         elif change < 0: emoji = "📉"; change_str = f"{change:.2f}"; pct_str = f"{pct:.2f}%"
         else: emoji = "➖"; change_str = "0"; pct_str = "0%"
-        price_info = f"{emoji} {close} ({change_str} / {pct_str}) | 📦 量：{vol} 張 ({src})"
+        price_info = f"{emoji} {close} ({change_str} / {pct_str}) | 📦 量：{vol} 張"
 
     signal, text, color = get_strategy_analysis(sstrat, f_buy, t_buy, phase_code, sthreshold)
     
@@ -307,13 +309,16 @@ def check_one_stock(target, all_chips, all_prices, target_date_str):
     send_discord(f"📊 {sname} ({sid}) 戰報", msg, color)
 
 if __name__ == "__main__":
-    print("🚀 戰情室旗艦掃描器 V10.6 (終極除錯．穩定版) 啟動...")
+    print("🚀 戰情室旗艦掃描器 V10.5 (精準導航修復版) 啟動...")
     target_date = get_target_date()
     target_date_str = target_date.strftime("%Y-%m-%d")
     all_chips_map = fetch_all_chips(target_date)
     if not all_chips_map:
         print("\n😴 系統偵測：今日查無籌碼資料 (休市)。休眠中。"); exit(0)
-    all_prices_map = get_best_prices(TARGETS, target_date)
+    
+    # 啟動智能報價 (MIS + Yahoo)
+    all_prices_map = get_combined_prices(TARGETS)
+    
     print(f"📊 數據就緒，開始分析...")
     for target in TARGETS:
         check_one_stock(target, all_chips_map, all_prices_map, target_date_str)
