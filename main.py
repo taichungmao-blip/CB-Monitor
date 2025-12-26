@@ -202,4 +202,108 @@ def fetch_all_chips(target_date):
         for row in data_list:
             try:
                 sid = "".join(row[0].split()); f_net = int(row[10].replace(',', '')) // 1000; t_net = int(row[13].replace(',', '')) // 1000
-                all_data[sid] = {'foreign
+                all_data[sid] = {'foreign': f_net, 'trust': t_net}
+            except: pass
+            try:
+                f_net = int(row[7].replace(',', '')) // 1000; t_net = int(row[10].replace(',', '')) // 1000
+                all_data[sid] = {'foreign': f_net, 'trust': t_net}
+            except: pass
+    except: pass
+    return all_data
+
+def get_strategy_analysis(strategy, foreign, trust, phase_code, threshold):
+    signal, text, color = "無訊號", "持續觀察", 0x808080
+    limit = threshold if threshold else 500
+
+    # 1. 土洋對作
+    if (foreign > limit and trust < -limit) or (foreign < -limit and trust > limit):
+        signal = "⚔️ 土洋對作"
+        text = f"外資與投信方向相反且金額巨大(>{limit})，籌碼混亂。"
+        color = 0xffa500 
+        return signal, text, color
+
+    # 2. 策略
+    if strategy == "STD": 
+        if phase_code == "PHASE_1":
+            if foreign < -limit: 
+                signal = "🛡️ 外資調節"; text = f"外資賣超逾 {limit} 張，賣壓沉重。"; color = 0x808080
+            elif trust > 10: 
+                signal = "🔥 投信佈局"; text = "生效前夕投信買超，籌碼相對安定。"; color = 0xffa500
+            elif foreign > limit: 
+                signal = "💹 外資補貨"; text = "外資主力進場，籌碼轉強。"; color = 0x00ffff 
+            else:
+                signal = "👀 盤整觀望"; text = "法人動作未達攻擊量。"; color = 0x808080
+        elif phase_code in ["PHASE_2", "PHASE_3"]:
+            if trust > 0 or foreign > limit: 
+                signal = "🚀 定價攻勢"; text = "法人大單敲進，全力衝刺競拍價格。"; color = 0x00ff00
+    elif strategy == "ECB": 
+        if phase_code in ["PHASE_1", "PHASE_2"]:
+            if foreign < -limit: 
+                signal = "🛡️ 外資鎖單"; text = "ECB 訂價前避險賣壓。"; color = 0x808080
+            elif foreign > limit: 
+                signal = "🔥 強力看好"; text = "不需避險直接大買，基本面極強。"; color = 0xffa500
+            else:
+                signal = "⚖️ 多空平衡"; text = "外資無明顯避險或拉抬動作。"; color = 0xcccccc 
+        elif phase_code == "PHASE_3" and foreign > limit: 
+            signal = "🚀 認錯回補"; text = "訂價完成，避險空單回補。"; color = 0x00ff00
+    elif strategy == "ENT":
+        if abs(foreign) > 20 or abs(trust) > 5: signal = "🎭 籌碼波動"; text = "法人進出，留意消息面。"; color = 0xff00ff
+    elif strategy == "PRICED": 
+        if foreign > limit or trust > 10: 
+            signal = "💹 溢價護盤"; text = "掛牌前夕法人買進。"; color = 0x00ff00
+        elif foreign < -limit: 
+            signal = "⚠️ 獲利調節"; text = "掛牌前外資轉賣，留意回檔。"; color = 0xffa500
+        else:
+            signal = "👀 盤整觀望"; text = "法人買賣超未達門檻，持續觀察。"; color = 0x808080
+    return signal, text, color
+
+def check_one_stock(target, all_chips, all_prices, target_date_str):
+    sid = target['id']
+    sname = target['name']
+    sdate = target['date']
+    sstrat = target['strategy']
+    sthreshold = target.get('threshold', 500)
+    
+    print(f"🔎 分析 {sid} {sname}...")
+    phase_code, phase_text = get_battle_phase(sdate)
+    f_buy = 0; t_buy = 0
+    if sid in all_chips:
+        f_buy = all_chips[sid]['foreign']; t_buy = all_chips[sid]['trust']
+    
+    price_info = "無報價"
+    if sid in all_prices:
+        p_data = all_prices[sid]
+        close = p_data['close']; change = p_data['change']; pct = p_data['pct']; vol = p_data['vol']
+        src = p_data.get('src', 'MIS')
+        if change > 0: emoji = "📈"; change_str = f"+{change:.2f}"; pct_str = f"+{pct:.2f}%"
+        elif change < 0: emoji = "📉"; change_str = f"{change:.2f}"; pct_str = f"{pct:.2f}%"
+        else: emoji = "➖"; change_str = "0"; pct_str = "0%"
+        price_info = f"{emoji} {close} ({change_str} / {pct_str}) | 📦 量：{vol} 張 ({src})"
+
+    signal, text, color = get_strategy_analysis(sstrat, f_buy, t_buy, phase_code, sthreshold)
+    
+    news_list = check_material_info(sid, sname)
+    news_text = ""
+    if news_list:
+        news_text = "\n\n🚨 **發現重訊：**\n" + "\n".join(news_list)
+        if color == 0x808080: color = 0xff00ff; signal = "📰 重訊發布"
+    
+    msg = f"📅 **{target_date_str}**\n💰 收盤：{price_info}\n{phase_text}\n----------------\n模式：{sstrat} (門檻:{sthreshold})\n👽 外資：`{f_buy}` 張\n🏦 投信：`{t_buy}` 張\n----------------\n💡 {signal}\n📜 {text}{news_text}"
+    send_discord(f"📊 {sname} ({sid}) 戰報", msg, color)
+
+if __name__ == "__main__":
+    print("🚀 戰情室旗艦掃描器 V10.5 (混合校正．絕對防禦版) 啟動...")
+    target_date = get_target_date()
+    target_date_str = target_date.strftime("%Y-%m-%d")
+    all_chips_map = fetch_all_chips(target_date)
+    if not all_chips_map:
+        print("\n😴 系統偵測：今日查無籌碼資料 (休市)。休眠中。"); exit(0)
+    
+    # ✅ 使用 V10.5 混合查價策略
+    all_prices_map = get_best_prices(TARGETS, target_date)
+    
+    print(f"📊 數據就緒，開始分析...")
+    for target in TARGETS:
+        check_one_stock(target, all_chips_map, all_prices_map, target_date_str)
+        time.sleep(1)
+    print("✅ 完成！")
