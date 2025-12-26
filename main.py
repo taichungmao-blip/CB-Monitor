@@ -17,8 +17,7 @@ session.headers.update({
     'Connection': 'keep-alive'
 })
 
-# 🛑 2. 監控目標清單 (V10.5 - 精準標記上市櫃)
-# mkt: 'tse' (上市), 'otc' (上櫃)
+# 🛑 2. 監控目標清單 (V10.7)
 TARGETS = [
     # --- 🔥 2026 1月生效 ---
     {"id": "6894", "name": "衛司特",   "date": "2026-01-13", "strategy": "STD", "threshold": 50,  "mkt": "otc"},
@@ -47,7 +46,7 @@ TARGETS = [
 def send_discord(title, msg, color=0x00ff00):
     if not DISCORD_WEBHOOK_URL: return
     data = {
-        "username": "CB 戰情室 (V10.5)",
+        "username": "CB 戰情室 (V10.7)",
         "embeds": [{
             "title": title,
             "description": msg,
@@ -81,92 +80,109 @@ def get_battle_phase(eff_date):
     elif days_diff == 0: return "PHASE_2", f"🔥 **D-Day：今日生效！**"
     else: return "PHASE_3", f"🚀 **後續追蹤：第 {abs(days_diff)} 天**"
 
-# ✅ 引擎二：Yahoo 股市救援 (當 MIS 失敗時啟動)
-def fetch_yahoo_price_fallback(sid):
-    try:
-        url = f"https://tw.stock.yahoo.com/quote/{sid}"
-        res = session.get(url, verify=False, timeout=5)
-        soup = BeautifulSoup(res.text, 'html.parser')
-        # 抓取股價 (Yahoo 結構常變，用正則抓大字體數字比較穩)
-        # 通常股價會在 Fz(32px) 這種 class 裡
-        price_tag = soup.find('span', class_=re.compile("Fz\(32px\)"))
-        if price_tag:
-            price_val = float(price_tag.text.replace(',', ''))
-            
-            # 嘗試抓漲跌
-            change_tag = soup.find('span', class_=re.compile("Fz\(20px\)"))
-            change_val = 0.0
-            if change_tag:
-                # 這裡可能包含 % 或 數值，簡單處理
-                try: change_txt = change_tag.text.replace('▼', '-').replace('▲', '').replace('%', '').strip(); change_val = float(change_txt)
-                except: pass
-            
-            return {'close': price_val, 'change': 0.0, 'pct': 0.0, 'vol': 'Yahoo'}
-    except: pass
-    return None
-
-# ✅ 引擎一：MIS 精準查詢
-def fetch_mis_prices(targets):
-    print(f"📥 正在透過 MIS 系統查詢 (精準模式)...")
+# ✅ 引擎：官方盤後結算表 (權威數據，解決上櫃誤差)
+def fetch_official_daily_close(target_date):
+    print(f"🏛️ 啟動「官方盤後結算引擎」 (100% 準確)...")
     price_map = {}
-    
-    # 初始化 Session
-    try:
-        session.get("https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw", timeout=5)
-    except: pass
+    date_str = target_date.strftime("%Y%m%d")
+    date_str_ro = f"{target_date.year-1911}/{target_date.month:02d}/{target_date.day:02d}"
 
+    # 1. 上市 (TWSE) 結算表
+    try:
+        url = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALLBUT0999&response=json"
+        res = session.get(url, verify=False)
+        js = res.json()
+        target_table = None
+        if js['stat'] == 'OK':
+            # 尋找包含股價的表格
+            for table in js.get('tables', []):
+                if "收盤價" in table.get('fields', []): target_table = table; break
+            
+            if target_table:
+                for row in target_table['data']:
+                    sid = row[0]
+                    try:
+                        # 處理 "106.00" 這種格式
+                        close = float(row[8].replace(',', ''))
+                        
+                        # 處理漲跌 (+/-)
+                        sign = -1 if "green" in row[9] or "-" in row[9] else 1
+                        diff = float(row[10].replace(',', '')) * sign
+                        
+                        vol = int(row[2].replace(',', '')) // 1000
+                        prev = close - diff
+                        pct = (diff / prev * 100) if prev != 0 else 0
+                        
+                        price_map[sid] = {'close': close, 'change': diff, 'pct': pct, 'vol': str(vol)}
+                    except: pass
+        print(f"   ✅ 上市結算資料下載完成")
+    except Exception as e: print(f"   ⚠️ 上市資料錯誤: {e}")
+
+    # 2. 上櫃 (TPEX) 結算表 - 這是抓到五福 106.0 的關鍵！
+    try:
+        url = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=json&d={date_str_ro}&s=0,asc,0"
+        res = session.get(url, verify=False)
+        js = res.json()
+        if 'aaData' in js:
+            for row in js['aaData']:
+                sid = row[0]
+                try:
+                    # 上櫃格式：代號, 名稱, 收盤, 漲跌...
+                    close = float(row[2].replace(',', ''))
+                    diff = float(row[3].replace(',', ''))
+                    vol = int(row[8].replace(',', '')) // 1000
+                    prev = close - diff
+                    pct = (diff / prev * 100) if prev != 0 else 0
+                    
+                    price_map[sid] = {'close': close, 'change': diff, 'pct': pct, 'vol': str(vol)}
+                except: pass
+        print(f"   ✅ 上櫃結算資料下載完成")
+    except Exception as e: print(f"   ⚠️ 上櫃資料錯誤: {e}")
+
+    return price_map
+
+# ✅ 引擎：MIS (盤中用)
+def fetch_mis_prices(targets):
+    print(f"📥 正在透過 MIS 系統查詢 (盤中模式)...")
+    price_map = {}
+    try: session.get("https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw", timeout=5)
+    except: pass
     query_list = []
     for t in targets:
-        # ⚠️ 關鍵修正：只請求正確的市場代號，不亂猜
         key = f"{t['mkt']}_{t['id']}.tw"
         query_list.append(key)
-    
     query_str = "|".join(query_list)
     ts = int(time.time() * 1000)
-    
     try:
-        # 加上 Referer 騙過防火牆
         headers = {'Referer': 'https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw'}
         url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={query_str}&json=1&delay=0&_={ts}"
         res = session.get(url, headers=headers, verify=False)
         js = res.json()
-        
         if 'msgArray' in js:
             for row in js['msgArray']:
                 try:
                     sid = row['c']
-                    price_str = row.get('z', '-')
-                    y_str = row.get('y', '-')
-                    vol_str = row.get('v', '0')
-                    
+                    price_str = row.get('z', '-'); y_str = row.get('y', '-'); vol_str = row.get('v', '0')
                     if price_str == '-':
                         if y_str != '-': price_val = float(y_str); change_val = 0.0; pct = 0.0
                         else: continue
                     else:
                         price_val = float(price_str); last_close = float(y_str)
-                        change_val = price_val - last_close
-                        pct = (change_val / last_close) * 100
-                    
+                        change_val = price_val - last_close; pct = (change_val / last_close) * 100
                     price_map[sid] = {'close': price_val, 'change': change_val, 'pct': pct, 'vol': vol_str}
                 except: pass
     except: pass
     return price_map
 
-# ✅ 智能整合：MIS + Yahoo 雙保險
-def get_combined_prices(targets):
-    # 1. 主力：MIS
-    prices = fetch_mis_prices(targets)
-    
-    # 2. 救援：檢查誰沒抓到，用 Yahoo 補
-    for t in targets:
-        sid = t['id']
-        if sid not in prices:
-            print(f"   ⚠️ {t['name']}({sid}) MIS 無資料，啟動 Yahoo 救援...")
-            y_data = fetch_yahoo_price_fallback(sid)
-            if y_data:
-                prices[sid] = y_data
-                
-    return prices
+# ✅ 智能分流主控台
+def get_best_prices(targets, target_date):
+    now = get_tw_time()
+    # 如果是下午 2 點後，強制使用「官方結算表」
+    if now.hour >= 14:
+        return fetch_official_daily_close(target_date)
+    else:
+        # 盤中只用 MIS
+        return fetch_mis_prices(targets)
 
 def check_material_info(sid, sname):
     found_news = []
@@ -231,22 +247,19 @@ def fetch_all_chips(target_date):
     except: pass
     return all_data
 
-# ✅ 策略邏輯 (V10.5 權重確認版)
+# ✅ V10.7 策略邏輯 (保留 V10.6 的修正)
 def get_strategy_analysis(strategy, foreign, trust, phase_code, threshold):
     signal, text, color = "無訊號", "持續觀察", 0x808080
     limit = threshold if threshold else 500
 
-    # 1. 優先判斷土洋對作
     if (foreign > limit and trust < -limit) or (foreign < -limit and trust > limit):
         signal = "⚔️ 土洋對作"; text = f"外資與投信方向相反且金額巨大(>{limit})，籌碼混亂。"; color = 0xffa500
         return signal, text, color
 
     if strategy == "STD": 
         if phase_code == "PHASE_1":
-            # 優先權 2：外資大賣 (權重高於投信小買) -> 修復全新(2455)誤判
             if foreign < -limit: 
                 signal = "🛡️ 外資調節"; text = f"外資賣超逾 {limit} 張，短線有壓，需留意回檔。"; color = 0x808080
-            # 優先權 3：投信買 (且外資沒大賣)
             elif trust > 10: 
                 signal = "🔥 投信佈局"; text = "生效前夕投信買超，看好定價行情。"; color = 0xffa500
             elif foreign > limit: 
@@ -255,8 +268,12 @@ def get_strategy_analysis(strategy, foreign, trust, phase_code, threshold):
                 signal = "👀 盤整觀望"; text = "法人動作未達攻擊量，持續觀察。"; color = 0x808080
         
         elif phase_code in ["PHASE_2", "PHASE_3"]:
-            if trust > 0 or foreign > limit: 
-                signal = "🚀 定價攻勢"; text = "法人大單敲進，全力衝刺競拍價格。"; color = 0x00ff00
+            if trust > 0 and foreign > 0: 
+                signal = "🚀 定價攻勢"; text = "法人合力買超，全力衝刺競拍價格。"; color = 0x00ff00
+            elif trust > 0 and foreign < 0: 
+                signal = "🛡️ 投信護盤"; text = "投信單獨買超支撐股價，但外資有賣壓。"; color = 0xffa500
+            elif foreign > limit: 
+                signal = "💹 外資拉抬"; text = "外資大單敲進，看好後市。"; color = 0x00ff00
             
     elif strategy == "ECB": 
         if phase_code in ["PHASE_1", "PHASE_2"]:
@@ -273,8 +290,12 @@ def get_strategy_analysis(strategy, foreign, trust, phase_code, threshold):
         if abs(foreign) > 20 or abs(trust) > 5: signal = "🎭 籌碼波動"; text = "法人進出，留意消息面。"; color = 0xff00ff
 
     elif strategy == "PRICED": 
-        if foreign > 0 or trust > 0: signal = "💹 溢價護盤"; text = "掛牌前夕法人買進。"; color = 0x00ff00
-        elif foreign < -10: signal = "⚠️ 獲利調節"; text = "掛牌前外資轉賣，留意回檔。"; color = 0xffa500
+        if foreign > limit or trust > limit: 
+            signal = "💹 溢價護盤"; text = "掛牌前夕法人買進。"; color = 0x00ff00
+        elif foreign < -limit: 
+            signal = "⚠️ 獲利調節"; text = "掛牌前外資轉賣，留意回檔。"; color = 0xffa500
+        else:
+            signal = "👀 盤整觀望"; text = f"法人買賣未達攻擊量(門檻:{limit})，持續觀察。"; color = 0x808080
 
     return signal, text, color
 
@@ -309,15 +330,16 @@ def check_one_stock(target, all_chips, all_prices, target_date_str):
     send_discord(f"📊 {sname} ({sid}) 戰報", msg, color)
 
 if __name__ == "__main__":
-    print("🚀 戰情室旗艦掃描器 V10.5 (精準導航修復版) 啟動...")
+    print("🚀 戰情室旗艦掃描器 V10.7 (官方結算權威版) 啟動...")
     target_date = get_target_date()
     target_date_str = target_date.strftime("%Y-%m-%d")
+    
     all_chips_map = fetch_all_chips(target_date)
     if not all_chips_map:
         print("\n😴 系統偵測：今日查無籌碼資料 (休市)。休眠中。"); exit(0)
     
-    # 啟動智能報價 (MIS + Yahoo)
-    all_prices_map = get_combined_prices(TARGETS)
+    # 智能分流：盤後自動切換到官方結算表
+    all_prices_map = get_best_prices(TARGETS, target_date)
     
     print(f"📊 數據就緒，開始分析...")
     for target in TARGETS:
