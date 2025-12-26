@@ -17,8 +17,7 @@ session.headers.update({
     'Connection': 'keep-alive'
 })
 
-# 🛑 2. 監控目標清單 (V10.8 - API 直連版)
-# mkt: 'tse' (上市), 'otc' (上櫃) -> 對應 Yahoo 的 .TW 與 .TWO
+# 🛑 2. 監控目標清單 (V10.9 - 智慧補漏版)
 TARGETS = [
     # --- 🔥 2026 1月生效 ---
     {"id": "6894", "name": "衛司特",   "date": "2026-01-13", "strategy": "STD", "threshold": 50,  "mkt": "otc"},
@@ -47,7 +46,7 @@ TARGETS = [
 def send_discord(title, msg, color=0x00ff00):
     if not DISCORD_WEBHOOK_URL: return
     data = {
-        "username": "CB 戰情室 (V10.8)",
+        "username": "CB 戰情室 (V10.9)",
         "embeds": [{
             "title": title,
             "description": msg,
@@ -81,109 +80,124 @@ def get_battle_phase(eff_date):
     elif days_diff == 0: return "PHASE_2", f"🔥 **D-Day：今日生效！**"
     else: return "PHASE_3", f"🚀 **後續追蹤：第 {abs(days_diff)} 天**"
 
-# ✅ 核心引擎：Yahoo Finance API (全球通用接口，最穩定)
+# ✅ 引擎一：Yahoo API (主力)
 def fetch_yahoo_api_price(sid, mkt):
     try:
-        # 轉換後綴：上市 -> .TW, 上櫃 -> .TWO
         suffix = ".TW" if mkt == "tse" else ".TWO"
         symbol = f"{sid}{suffix}"
-        
-        # Yahoo Finance Chart API (不需爬蟲，直接拿 JSON)
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d"
-        
-        # 必須偽裝成瀏覽器
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }
-        
+        headers = {'User-Agent': 'Mozilla/5.0'}
         res = session.get(url, headers=headers, timeout=5)
         data = res.json()
-        
-        # 解析 JSON 結構
         meta = data['chart']['result'][0]['meta']
         indicators = data['chart']['result'][0]['indicators']['quote'][0]
         
-        # 取得最新價格 (regularMarketPrice)
         price_val = meta.get('regularMarketPrice')
         prev_close = meta.get('chartPreviousClose')
         
-        # 如果 API 暫時沒給 regularMarketPrice，嘗試拿最後一筆成交
         if price_val is None and indicators.get('close'):
-             # 過濾 None 值
              closes = [x for x in indicators['close'] if x is not None]
              if closes: price_val = closes[-1]
 
         if price_val is not None and prev_close is not None:
             change_val = price_val - prev_close
             pct = (change_val / prev_close) * 100
-            
-            # 取得成交量 (最後一筆或當日加總)
             vol_val = 0
             if indicators.get('volume'):
-                 # 當日加總
                  vols = [v for v in indicators['volume'] if v is not None]
-                 vol_val = sum(vols) // 1000 # 換算成張數
-            
+                 vol_val = sum(vols) // 1000
             return {'close': price_val, 'change': change_val, 'pct': pct, 'vol': str(int(vol_val))}
-            
-    except Exception as e:
-        print(f"   ⚠️ Yahoo API ({sid}) 失敗: {e}")
+    except: pass
     return None
 
-# ✅ 引擎：MIS (盤中備用)
-def fetch_mis_prices(targets):
-    print(f"📥 啟動 MIS 查詢 (輔助)...")
+# ✅ 引擎二：證交所總表 (Listing Fallback)
+def fetch_twse_daily_table(target_date):
+    print("   🛡️ 啟動 [證交所] 官方總表下載...")
     price_map = {}
-    try: session.get("https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw", timeout=3)
-    except: pass
-    query_list = []
-    for t in targets:
-        key = f"{t['mkt']}_{t['id']}.tw"
-        query_list.append(key)
-    query_str = "|".join(query_list)
-    ts = int(time.time() * 1000)
+    date_str = target_date.strftime("%Y%m%d")
     try:
-        headers = {'Referer': 'https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw'}
-        url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={query_str}&json=1&delay=0&_={ts}"
-        res = session.get(url, headers=headers, verify=False, timeout=5)
+        url = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALLBUT0999&response=json"
+        res = session.get(url, verify=False)
         js = res.json()
-        if 'msgArray' in js:
-            for row in js['msgArray']:
+        target_table = None
+        if js['stat'] == 'OK':
+            for table in js.get('tables', []):
+                if "收盤價" in table.get('fields', []): target_table = table; break
+            if target_table:
+                for row in target_table['data']:
+                    sid = row[0]
+                    try:
+                        if row[8] == '--': continue
+                        close = float(row[8].replace(',', ''))
+                        sign = -1 if "green" in row[9] or "-" in row[9] else 1
+                        diff = float(row[10].replace(',', '')) * sign
+                        vol = int(row[2].replace(',', '')) // 1000
+                        prev = close - diff
+                        pct = (diff / prev * 100) if prev != 0 else 0
+                        price_map[sid] = {'close': close, 'change': diff, 'pct': pct, 'vol': str(vol)}
+                    except: pass
+    except: pass
+    return price_map
+
+# ✅ 引擎三：櫃買中心總表 (OTC Fallback)
+def fetch_tpex_daily_table(target_date):
+    print("   🛡️ 啟動 [櫃買中心] 官方總表下載...")
+    price_map = {}
+    date_str_ro = f"{target_date.year-1911}/{target_date.month:02d}/{target_date.day:02d}"
+    try:
+        url = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=json&d={date_str_ro}&s=0,asc,0"
+        res = session.get(url, verify=False)
+        js = res.json()
+        if 'aaData' in js:
+            for row in js['aaData']:
+                sid = row[0]
                 try:
-                    sid = row['c']
-                    price_str = row.get('z', '-'); y_str = row.get('y', '-'); vol_str = row.get('v', '0')
-                    if price_str != '-':
-                        price_val = float(price_str); last_close = float(y_str)
-                        change_val = price_val - last_close; pct = (change_val / last_close) * 100
-                        price_map[sid] = {'close': price_val, 'change': change_val, 'pct': pct, 'vol': vol_str}
+                    if row[2] == '---': continue
+                    close = float(row[2].replace(',', ''))
+                    diff = float(row[3].replace(',', ''))
+                    vol = int(row[8].replace(',', '')) // 1000
+                    prev = close - diff
+                    pct = (diff / prev * 100) if prev != 0 else 0
+                    price_map[sid] = {'close': close, 'change': diff, 'pct': pct, 'vol': str(vol)}
                 except: pass
     except: pass
     return price_map
 
-# ✅ 智能整合：優先使用 Yahoo API (最穩)，MIS 當備援
-def get_combined_prices(targets):
-    print(f"🚀 啟動 Yahoo API 直連引擎 (100% 穿透)...")
+# ✅ 智能整合邏輯
+def get_best_prices(targets, target_date):
+    print(f"🚀 啟動報價引擎 (優先: Yahoo API)...")
     final_prices = {}
     
-    # 1. 逐一查詢 Yahoo API
+    # 1. 先跑 Yahoo
     for t in targets:
         sid = t['id']
-        mkt = t['mkt']
-        
-        data = fetch_yahoo_api_price(sid, mkt)
-        if data:
-            final_prices[sid] = data
-            print(f"   ✅ Yahoo 成功抓取: {t['name']}({sid}) ${data['close']}")
-        else:
-            print(f"   ⚠️ Yahoo 暫無 {t['name']} 資料，稍後嘗試 MIS")
+        data = fetch_yahoo_api_price(sid, t['mkt'])
+        if data: final_prices[sid] = data
+        else: print(f"   ⚠️ Yahoo 缺漏: {t['name']}({sid})")
 
-    # 2. 如果有缺漏，用 MIS 補
-    if len(final_prices) < len(targets):
-        mis_data = fetch_mis_prices(targets)
-        for sid, data in mis_data.items():
-            if sid not in final_prices:
-                final_prices[sid] = data
-                print(f"   ✅ MIS 補位成功: {sid}")
+    # 2. 檢查是否有缺漏
+    missing_tse = False
+    missing_otc = False
+    for t in targets:
+        if t['id'] not in final_prices:
+            if t['mkt'] == 'tse': missing_tse = True
+            if t['mkt'] == 'otc': missing_otc = True
+    
+    # 3. 有缺上市 -> 下載證交所總表
+    if missing_tse:
+        twse_data = fetch_twse_daily_table(target_date)
+        for t in targets:
+            if t['id'] not in final_prices and t['mkt'] == 'tse' and t['id'] in twse_data:
+                final_prices[t['id']] = twse_data[t['id']]
+                print(f"   ✅ 證交所總表補位: {t['name']}")
+
+    # 4. 有缺上櫃 -> 下載櫃買總表 (五福應該會在這裡被抓到)
+    if missing_otc:
+        tpex_data = fetch_tpex_daily_table(target_date)
+        for t in targets:
+            if t['id'] not in final_prices and t['mkt'] == 'otc' and t['id'] in tpex_data:
+                final_prices[t['id']] = tpex_data[t['id']]
+                print(f"   ✅ 櫃買總表補位: {t['name']}")
 
     return final_prices
 
@@ -210,7 +224,6 @@ def fetch_all_chips(target_date):
     all_data = {}
     date_str = target_date.strftime("%Y%m%d")
     ts = int(time.time())
-    # TWSE
     try:
         url = f"https://www.twse.com.tw/rwd/zh/fund/T86?date={date_str}&selectType=ALLBUT0999&response=json&_={ts}"
         res = session.get(url, verify=False)
@@ -224,7 +237,6 @@ def fetch_all_chips(target_date):
                     all_data[sid] = {'foreign': f_net, 'trust': t_net}
                 except: pass
     except: pass
-    # TPEX
     try:
         if 'tpex_visited' not in session.cookies:
             session.get("https://www.tpex.org.tw/web/", verify=False)
@@ -250,7 +262,6 @@ def fetch_all_chips(target_date):
     except: pass
     return all_data
 
-# ✅ 策略邏輯 (V10.8 維持)
 def get_strategy_analysis(strategy, foreign, trust, phase_code, threshold):
     signal, text, color = "無訊號", "持續觀察", 0x808080
     limit = threshold if threshold else 500
@@ -333,14 +344,14 @@ def check_one_stock(target, all_chips, all_prices, target_date_str):
     send_discord(f"📊 {sname} ({sid}) 戰報", msg, color)
 
 if __name__ == "__main__":
-    print("🚀 戰情室旗艦掃描器 V10.8 (Yahoo API 直連版) 啟動...")
+    print("🚀 戰情室旗艦掃描器 V10.9 (智慧補漏網版) 啟動...")
     target_date = get_target_date()
     target_date_str = target_date.strftime("%Y-%m-%d")
     all_chips_map = fetch_all_chips(target_date)
     if not all_chips_map:
         print("\n😴 系統偵測：今日查無籌碼資料 (休市)。休眠中。"); exit(0)
     
-    all_prices_map = get_combined_prices(TARGETS)
+    all_prices_map = get_best_prices(TARGETS, target_date)
     print(f"📊 數據就緒，開始分析...")
     for target in TARGETS:
         check_one_stock(target, all_chips_map, all_prices_map, target_date_str)
