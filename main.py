@@ -44,7 +44,7 @@ TARGETS = [
 
 def send_discord(title, msg, color=0x00ff00):
     if not DISCORD_WEBHOOK_URL: return
-    data = {"username": "CB 戰情室 (V10.5)", "embeds": [{"title": title, "description": msg, "color": color, "timestamp": datetime.now().isoformat()}]}
+    data = {"username": "CB 戰情室 (V10.6)", "embeds": [{"title": title, "description": msg, "color": color, "timestamp": datetime.now().isoformat()}]}
     try: session.post(DISCORD_WEBHOOK_URL, json=data, verify=False)
     except: pass
 
@@ -70,9 +70,9 @@ def get_battle_phase(eff_date):
     elif days_diff == 0: return "PHASE_2", f"🔥 **D-Day：今日生效！**"
     else: return "PHASE_3", f"🚀 **後續追蹤：第 {abs(days_diff)} 天**"
 
-# 1. MIS 查價 (打底用)
+# 1. MIS 查價 (基礎數據)
 def fetch_mis_prices(targets):
-    print(f"   ⚡ 啟動 MIS 即時查價 (確保有資料)...")
+    print(f"   ⚡ 啟動 MIS 即時查價...")
     price_map = {}
     chunk_size = 20
     all_queries = []
@@ -97,13 +97,13 @@ def fetch_mis_prices(targets):
         except: pass
     return price_map
 
-# 2. 官方表查價 (覆蓋用)
+# 2. 官方表查價 (精準修正)
 def fetch_official_close_prices(target_date):
-    print(f"   📜 啟動 官方結算報價 (嘗試覆蓋)...")
+    print(f"   📜 啟動 官方結算報價...")
     price_map = {}
     date_str = target_date.strftime("%Y%m%d"); ts = int(time.time())
     
-    # TWSE
+    # TWSE (上市)
     try:
         url = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALLBUT0999&response=json&_={ts}"
         res = session.get(url, verify=False); js = res.json()
@@ -126,7 +126,7 @@ def fetch_official_close_prices(target_date):
                     except: pass
     except: pass
     
-    # TPEX
+    # TPEX (上櫃) - 修正解析邏輯
     try:
         date_str_ro = f"{target_date.year-1911}/{target_date.month:02d}/{target_date.day:02d}"
         headers = session.headers.copy(); headers['Referer'] = 'https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote.php'
@@ -137,6 +137,7 @@ def fetch_official_close_prices(target_date):
                 sid = row[0]
                 if len(sid) > 4: continue
                 try:
+                    if '---' in row[2]: continue # 避開無報價
                     close = float(row[2].replace(',', '')); diff = float(row[3].replace(',', ''))
                     vol = int(row[8].replace(',', '')) // 1000
                     prev = close - diff; pct = (diff / prev) * 100 if prev != 0 else 0.0
@@ -145,20 +146,20 @@ def fetch_official_close_prices(target_date):
     except: pass
     return price_map
 
-# ✅ V10.5 核心修復：混合校正策略
 def get_best_prices(targets, target_date):
-    # 1. 不管怎樣，先抓 MIS (保證五福一定有資料，至少是 105.5)
+    # 1. 基礎：先抓 MIS
     mis_prices = fetch_mis_prices(targets)
     
-    # 2. 如果是盤後，嘗試抓官方表來"覆蓋"
+    # 2. 進階：盤後用官方表覆蓋
     if get_tw_time().hour >= 15:
         official_prices = fetch_official_close_prices(target_date)
         if official_prices:
-            print(f"   ✨ 取得官方報價 {len(official_prices)} 筆，進行校正覆蓋...")
-            # 用官方資料更新 MIS 資料 (如果官方表只有 TWSE，那 TPEX 的五福會保留 MIS 的值，不會消失)
-            mis_prices.update(official_prices)
+            print(f"   ✨ 官方報價取得成功，進行校正...")
+            # 只覆蓋有抓到的資料，沒抓到的(如TPEX失敗)保留MIS資料
+            for sid, data in official_prices.items():
+                mis_prices[sid] = data
         else:
-            print("   ⚠️ 官方表尚未產出或連線失敗，維持使用 MIS。")
+            print("   ⚠️ 官方表無回應，維持使用 MIS 數據。")
             
     return mis_prices
 
@@ -181,6 +182,7 @@ def check_material_info(sid, sname):
 def fetch_all_chips(target_date):
     all_data = {}
     date_str = target_date.strftime("%Y%m%d"); ts = int(time.time())
+    # TWSE
     try:
         url = f"https://www.twse.com.tw/rwd/zh/fund/T86?date={date_str}&selectType=ALLBUT0999&response=json&_={ts}"
         res = session.get(url, verify=False); js = res.json()
@@ -191,6 +193,7 @@ def fetch_all_chips(target_date):
                     all_data[sid] = {'foreign': f_net, 'trust': t_net}
                 except: pass
     except: pass
+    # TPEX - 修正錯誤覆蓋問題
     try:
         if 'tpex_visited' not in session.cookies: session.get("https://www.tpex.org.tw/web/", verify=False); session.cookies.set('tpex_visited', 'true')
         date_str_ro = f"{target_date.year-1911}/{target_date.month:02d}/{target_date.day:02d}"
@@ -199,15 +202,24 @@ def fetch_all_chips(target_date):
         data_list = []
         if 'tables' in js and len(js['tables']) > 0: data_list = js['tables'][0]['data']
         elif 'aaData' in js: data_list = js['aaData']
+        
         for row in data_list:
+            sid = "".join(row[0].split())
+            got_data = False
+            # 優先嘗試完整格式 (Col 10=外資, 13=投信)
             try:
-                sid = "".join(row[0].split()); f_net = int(row[10].replace(',', '')) // 1000; t_net = int(row[13].replace(',', '')) // 1000
-                all_data[sid] = {'foreign': f_net, 'trust': t_net}
+                if len(row) > 13:
+                    f_net = int(row[10].replace(',', '')) // 1000; t_net = int(row[13].replace(',', '')) // 1000
+                    all_data[sid] = {'foreign': f_net, 'trust': t_net}
+                    got_data = True
             except: pass
-            try:
-                f_net = int(row[7].replace(',', '')) // 1000; t_net = int(row[10].replace(',', '')) // 1000
-                all_data[sid] = {'foreign': f_net, 'trust': t_net}
-            except: pass
+            
+            # 如果上面失敗，才嘗試舊格式 (Col 7=外資, 10=投信)
+            if not got_data:
+                try:
+                    f_net = int(row[7].replace(',', '')) // 1000; t_net = int(row[10].replace(',', '')) // 1000
+                    all_data[sid] = {'foreign': f_net, 'trust': t_net}
+                except: pass
     except: pass
     return all_data
 
@@ -248,13 +260,16 @@ def get_strategy_analysis(strategy, foreign, trust, phase_code, threshold):
             signal = "🚀 認錯回補"; text = "訂價完成，避險空單回補。"; color = 0x00ff00
     elif strategy == "ENT":
         if abs(foreign) > 20 or abs(trust) > 5: signal = "🎭 籌碼波動"; text = "法人進出，留意消息面。"; color = 0xff00ff
+    
+    # ✅ 修正：投信也必須遵守 limit 門檻
     elif strategy == "PRICED": 
-        if foreign > limit or trust > 10: 
+        if foreign > limit or trust > limit: 
             signal = "💹 溢價護盤"; text = "掛牌前夕法人買進。"; color = 0x00ff00
         elif foreign < -limit: 
             signal = "⚠️ 獲利調節"; text = "掛牌前外資轉賣，留意回檔。"; color = 0xffa500
         else:
             signal = "👀 盤整觀望"; text = "法人買賣超未達門檻，持續觀察。"; color = 0x808080
+            
     return signal, text, color
 
 def check_one_stock(target, all_chips, all_prices, target_date_str):
@@ -292,16 +307,13 @@ def check_one_stock(target, all_chips, all_prices, target_date_str):
     send_discord(f"📊 {sname} ({sid}) 戰報", msg, color)
 
 if __name__ == "__main__":
-    print("🚀 戰情室旗艦掃描器 V10.5 (混合校正．絕對防禦版) 啟動...")
+    print("🚀 戰情室旗艦掃描器 V10.6 (終極除錯．穩定版) 啟動...")
     target_date = get_target_date()
     target_date_str = target_date.strftime("%Y-%m-%d")
     all_chips_map = fetch_all_chips(target_date)
     if not all_chips_map:
         print("\n😴 系統偵測：今日查無籌碼資料 (休市)。休眠中。"); exit(0)
-    
-    # ✅ 使用 V10.5 混合查價策略
     all_prices_map = get_best_prices(TARGETS, target_date)
-    
     print(f"📊 數據就緒，開始分析...")
     for target in TARGETS:
         check_one_stock(target, all_chips_map, all_prices_map, target_date_str)
