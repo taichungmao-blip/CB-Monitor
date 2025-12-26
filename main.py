@@ -175,9 +175,8 @@ def fetch_goodinfo_scraper(sid):
         res.encoding = 'utf-8'
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # 抓取成交價 (通常在第一個 big bold text)
-        # 尋找 <td bgcolor=white>...
-        # 這邊用比較通用的 table 結構抓
+        # 抓取成交價 (通用 table 結構)
+        # 尋找 class='b1 p4_2 r10' 這種表格通常是即時報價框
         table = soup.find('table', {'class': 'b1 p4_2 r10'})
         if table:
             rows = table.find_all('tr')
