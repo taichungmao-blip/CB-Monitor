@@ -7,18 +7,8 @@ from bs4 import BeautifulSoup
 
 # 🛑 1. 系統設定區
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-# ✅ 從環境變數讀取 Webhook
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
-# 本地測試時請解除下方註解並填入網址
-# DISCORD_WEBHOOK_URL = "您的Discord_Webhook_網址"
-
-if not DISCORD_WEBHOOK_URL:
-    print("❌ 錯誤：未設定 DISCORD_WEBHOOK_URL")
-    # exit(1)
-
-# ✅ 瀏覽器偽裝
 session = requests.Session()
 session.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -26,14 +16,14 @@ session.headers.update({
     'Connection': 'keep-alive'
 })
 
-# 🛑 2. 監控目標清單 (V10.0 新增衛司特)
+# 🛑 2. 監控目標清單 (V10.2)
 TARGETS = [
-    # --- 🔥 2026 1月生效 (重點戰區) ---
-    {"id": "6894", "name": "衛司特",   "date": "2026-01-13", "strategy": "STD", "threshold": 50},   # NEW! 3億極致鎖碼/ESG煉金
-    {"id": "6913", "name": "鴻呈",     "date": "2026-01-13", "strategy": "STD", "threshold": 100},  # 4.5億爆發型
-    {"id": "2324", "name": "仁寶",     "date": "2026-01-12", "strategy": "ECB", "threshold": 1000}, # 核彈級ECB
-    {"id": "3587", "name": "閎康",     "date": "2026-01-12", "strategy": "STD", "threshold": 150},  # 檢測精品
-    {"id": "6515", "name": "穎崴",     "date": "2026-01-09", "strategy": "STD", "threshold": 50},   # 千金股
+    # --- 🔥 2026 1月生效 ---
+    {"id": "6894", "name": "衛司特",   "date": "2026-01-13", "strategy": "STD", "threshold": 50},
+    {"id": "6913", "name": "鴻呈",     "date": "2026-01-13", "strategy": "STD", "threshold": 100},
+    {"id": "2324", "name": "仁寶",     "date": "2026-01-12", "strategy": "ECB", "threshold": 1000},
+    {"id": "3587", "name": "閎康",     "date": "2026-01-12", "strategy": "STD", "threshold": 150},
+    {"id": "6515", "name": "穎崴",     "date": "2026-01-09", "strategy": "STD", "threshold": 50},
     {"id": "2329", "name": "華泰",     "date": "2026-01-09", "strategy": "STD", "threshold": 500},
     {"id": "4923", "name": "力士",     "date": "2026-01-09", "strategy": "STD", "threshold": 100},
 
@@ -55,7 +45,7 @@ TARGETS = [
 def send_discord(title, msg, color=0x00ff00):
     if not DISCORD_WEBHOOK_URL: return
     data = {
-        "username": "CB 戰情室 (V10.0)",
+        "username": "CB 戰情室 (V10.2)",
         "embeds": [{
             "title": title,
             "description": msg,
@@ -73,7 +63,6 @@ def get_tw_time():
 
 def get_target_date():
     now = get_tw_time()
-    # 下午 3 點前抓昨天
     if now.hour < 15: 
         target = now - timedelta(days=1)
         print(f"🕒 台灣時間 {now.strftime('%H:%M')} (盤中)，自動抓取【昨天 {target.strftime('%Y-%m-%d')}】資料")
@@ -86,30 +75,24 @@ def get_battle_phase(eff_date):
     eff_dt = datetime.strptime(eff_date, "%Y-%m-%d").replace(tzinfo=timezone(timedelta(hours=8)))
     today = get_tw_time()
     days_diff = (eff_dt.date() - today.date()).days
-    
     if days_diff > 0: return "PHASE_1", f"⏳ **倒數 {days_diff} 天**"
     elif days_diff == 0: return "PHASE_2", f"🔥 **D-Day：今日生效！**"
     else: return "PHASE_3", f"🚀 **後續追蹤：第 {abs(days_diff)} 天**"
 
-# ✅ MIS 系統查詢：抓取「價格」與「成交量」
 def fetch_snapshot_prices(targets):
     print(f"📥 正在透過 MIS 系統查詢最新報價與成交量...")
     price_map = {}
-    
     query_list = []
     for t in targets:
         sid = t['id']
         query_list.append(f"tse_{sid}.tw")
         query_list.append(f"otc_{sid}.tw")
-    
     query_str = "|".join(query_list)
     ts = int(time.time() * 1000)
-    
     try:
         url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={query_str}&json=1&delay=0&_={ts}"
         res = session.get(url, verify=False)
         js = res.json()
-        
         if 'msgArray' in js:
             for row in js['msgArray']:
                 try:
@@ -117,31 +100,15 @@ def fetch_snapshot_prices(targets):
                     price_str = row.get('z', '-')
                     y_str = row.get('y', '-')
                     vol_str = row.get('v', '0')
-                    
                     if price_str == '-':
-                        price_val = float(y_str)
-                        change_val = 0.0
-                        pct = 0.0
+                        price_val = float(y_str); change_val = 0.0; pct = 0.0
                     else:
-                        price_val = float(price_str)
-                        last_close = float(y_str)
+                        price_val = float(price_str); last_close = float(y_str)
                         change_val = price_val - last_close
                         pct = (change_val / last_close) * 100
-                    
-                    price_map[sid] = {
-                        'close': price_val,
-                        'change': change_val,
-                        'pct': pct,
-                        'vol': vol_str
-                    }
+                    price_map[sid] = {'close': price_val, 'change': change_val, 'pct': pct, 'vol': vol_str}
                 except: pass
-            print(f"   ✅ 成功取得 {len(price_map)} 檔報價資訊")
-        else:
-            print(f"   ⚠️ MIS 回傳無資料")
-            
-    except Exception as e:
-        print(f"❌ MIS 報價錯誤: {e}")
-        
+    except: pass
     return price_map
 
 def check_material_info(sid, sname):
@@ -167,7 +134,6 @@ def fetch_all_chips(target_date):
     all_data = {}
     date_str = target_date.strftime("%Y%m%d")
     ts = int(time.time())
-
     # TWSE
     try:
         url = f"https://www.twse.com.tw/rwd/zh/fund/T86?date={date_str}&selectType=ALLBUT0999&response=json&_={ts}"
@@ -182,7 +148,6 @@ def fetch_all_chips(target_date):
                     all_data[sid] = {'foreign': f_net, 'trust': t_net}
                 except: pass
     except: pass
-
     # TPEX
     try:
         if 'tpex_visited' not in session.cookies:
@@ -207,29 +172,44 @@ def fetch_all_chips(target_date):
                 all_data[sid] = {'foreign': f_net, 'trust': t_net}
             except: pass
     except: pass
-    
     return all_data
 
+# ✅ 修正後的策略分析邏輯 (V10.2 - 權重校正版)
 def get_strategy_analysis(strategy, foreign, trust, phase_code, threshold):
     signal, text, color = "無訊號", "持續觀察", 0x808080
     limit = threshold if threshold else 500
 
+    # 1. 土洋對作 (權重最高)
+    # 如果兩邊都大於門檻且方向相反 -> 顯示土洋對作
+    if (foreign > limit and trust < -limit) or (foreign < -limit and trust > limit):
+        signal = "⚔️ 土洋對作"
+        text = f"外資與投信方向相反且金額巨大(>{limit})，籌碼混亂。"
+        color = 0xffa500 # 橘色警戒
+        return signal, text, color
+
+    # 2. 策略細分
     if strategy == "STD": 
         if phase_code == "PHASE_1":
-            if trust > 0: 
-                signal = "🔥 投信佈局"; text = "生效前夕投信買超，看好定價行情。"; color = 0xffa500
+            # 修正邏輯：外資賣超如果大於門檻，優先級高於投信小買
+            if foreign < -limit: 
+                signal = "🛡️ 外資調節"; text = f"外資賣超逾 {limit} 張，賣壓沉重，雖然投信可能有小買，但仍需留意。"; color = 0x808080
+            
+            # 只有在外資沒有大賣的情況下，才看投信是否買進
+            elif trust > 10: # 投信買超至少要大於10張
+                signal = "🔥 投信佈局"; text = "生效前夕投信買超，籌碼相對安定。"; color = 0xffa500
+            
             elif foreign > limit: 
                 signal = "💹 外資補貨"; text = "外資主力進場，籌碼轉強。"; color = 0x00ffff 
-            elif foreign < -limit: 
-                signal = "🛡️ 外資調節"; text = f"外資賣超逾 {limit} 張，短線有壓。"; color = 0x808080
             else:
                 signal = "👀 盤整觀望"; text = "法人動作未達攻擊量，持續觀察。"; color = 0x808080
+        
         elif phase_code in ["PHASE_2", "PHASE_3"]:
             if trust > 0 or foreign > limit: 
                 signal = "🚀 定價攻勢"; text = "法人大單敲進，全力衝刺競拍價格。"; color = 0x00ff00
             
     elif strategy == "ECB": 
         if phase_code in ["PHASE_1", "PHASE_2"]:
+            # ECB 邏輯維持：外資鎖單最重要
             if foreign < -limit: 
                 signal = "🛡️ 外資鎖單"; text = "ECB 訂價前避險賣壓。"; color = 0x808080
             elif foreign > limit: 
@@ -257,35 +237,17 @@ def check_one_stock(target, all_chips, all_prices, target_date_str):
     
     print(f"🔎 分析 {sid} {sname}...")
     phase_code, phase_text = get_battle_phase(sdate)
-    
-    # 籌碼
     f_buy = 0; t_buy = 0
     if sid in all_chips:
-        f_buy = all_chips[sid]['foreign']
-        t_buy = all_chips[sid]['trust']
+        f_buy = all_chips[sid]['foreign']; t_buy = all_chips[sid]['trust']
     
-    # 報價
     price_info = "無報價"
     if sid in all_prices:
         p_data = all_prices[sid]
-        close = p_data['close']
-        change = p_data['change']
-        pct = p_data['pct']
-        vol = p_data['vol']
-        
-        if change > 0: 
-            emoji = "📈"
-            change_str = f"+{change:.2f}"
-            pct_str = f"+{pct:.2f}%"
-        elif change < 0: 
-            emoji = "📉"
-            change_str = f"{change:.2f}"
-            pct_str = f"{pct:.2f}%"
-        else: 
-            emoji = "➖"
-            change_str = "0"
-            pct_str = "0%"
-        
+        close = p_data['close']; change = p_data['change']; pct = p_data['pct']; vol = p_data['vol']
+        if change > 0: emoji = "📈"; change_str = f"+{change:.2f}"; pct_str = f"+{pct:.2f}%"
+        elif change < 0: emoji = "📉"; change_str = f"{change:.2f}"; pct_str = f"{pct:.2f}%"
+        else: emoji = "➖"; change_str = "0"; pct_str = "0%"
         price_info = f"{emoji} {close} ({change_str} / {pct_str}) | 📦 量：{vol} 張"
 
     signal, text, color = get_strategy_analysis(sstrat, f_buy, t_buy, phase_code, sthreshold)
@@ -294,30 +256,20 @@ def check_one_stock(target, all_chips, all_prices, target_date_str):
     news_text = ""
     if news_list:
         news_text = "\n\n🚨 **發現重訊：**\n" + "\n".join(news_list)
-        if color == 0x808080: 
-            color = 0xff00ff
-            signal = "📰 重訊發布"
+        if color == 0x808080: color = 0xff00ff; signal = "📰 重訊發布"
     
     msg = f"📅 **{target_date_str}**\n💰 收盤：{price_info}\n{phase_text}\n----------------\n模式：{sstrat} (門檻:{sthreshold})\n👽 外資：`{f_buy}` 張\n🏦 投信：`{t_buy}` 張\n----------------\n💡 {signal}\n📜 {text}{news_text}"
-    
     send_discord(f"📊 {sname} ({sid}) 戰報", msg, color)
 
 if __name__ == "__main__":
-    print("🚀 戰情室旗艦掃描器 V10.0 (ESG煉金術版) 啟動...")
+    print("🚀 戰情室旗艦掃描器 V10.2 (權重校正版) 啟動...")
     target_date = get_target_date()
     target_date_str = target_date.strftime("%Y-%m-%d")
-    
-    # 1. 抓籌碼
     all_chips_map = fetch_all_chips(target_date)
     if not all_chips_map:
-        print("\n😴 系統偵測：今日查無籌碼資料 (休市)。休眠中。")
-        exit(0)
-
-    # 2. 抓報價
+        print("\n😴 系統偵測：今日查無籌碼資料 (休市)。休眠中。"); exit(0)
     all_prices_map = fetch_snapshot_prices(TARGETS)
-    
     print(f"📊 數據就緒，開始分析...")
-    
     for target in TARGETS:
         check_one_stock(target, all_chips_map, all_prices_map, target_date_str)
         time.sleep(1)
