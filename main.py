@@ -17,7 +17,7 @@ session.headers.update({
     'Connection': 'keep-alive'
 })
 
-# 🛑 2. 監控目標清單 (V10.9 - 智慧補漏版)
+# 🛑 2. 監控目標清單 (V10.95)
 TARGETS = [
     # --- 🔥 2026 1月生效 ---
     {"id": "6894", "name": "衛司特",   "date": "2026-01-13", "strategy": "STD", "threshold": 50,  "mkt": "otc"},
@@ -46,7 +46,7 @@ TARGETS = [
 def send_discord(title, msg, color=0x00ff00):
     if not DISCORD_WEBHOOK_URL: return
     data = {
-        "username": "CB 戰情室 (V10.9)",
+        "username": "CB 戰情室 (V10.95)",
         "embeds": [{
             "title": title,
             "description": msg,
@@ -80,7 +80,7 @@ def get_battle_phase(eff_date):
     elif days_diff == 0: return "PHASE_2", f"🔥 **D-Day：今日生效！**"
     else: return "PHASE_3", f"🚀 **後續追蹤：第 {abs(days_diff)} 天**"
 
-# ✅ 引擎一：Yahoo API (主力)
+# ✅ 引擎一：Yahoo API
 def fetch_yahoo_api_price(sid, mkt):
     try:
         suffix = ".TW" if mkt == "tse" else ".TWO"
@@ -91,14 +91,11 @@ def fetch_yahoo_api_price(sid, mkt):
         data = res.json()
         meta = data['chart']['result'][0]['meta']
         indicators = data['chart']['result'][0]['indicators']['quote'][0]
-        
         price_val = meta.get('regularMarketPrice')
         prev_close = meta.get('chartPreviousClose')
-        
         if price_val is None and indicators.get('close'):
              closes = [x for x in indicators['close'] if x is not None]
              if closes: price_val = closes[-1]
-
         if price_val is not None and prev_close is not None:
             change_val = price_val - prev_close
             pct = (change_val / prev_close) * 100
@@ -110,7 +107,7 @@ def fetch_yahoo_api_price(sid, mkt):
     except: pass
     return None
 
-# ✅ 引擎二：證交所總表 (Listing Fallback)
+# ✅ 引擎二：證交所總表
 def fetch_twse_daily_table(target_date):
     print("   🛡️ 啟動 [證交所] 官方總表下載...")
     price_map = {}
@@ -139,7 +136,7 @@ def fetch_twse_daily_table(target_date):
     except: pass
     return price_map
 
-# ✅ 引擎三：櫃買中心總表 (OTC Fallback)
+# ✅ 引擎三：櫃買中心總表
 def fetch_tpex_daily_table(target_date):
     print("   🛡️ 啟動 [櫃買中心] 官方總表下載...")
     price_map = {}
@@ -163,41 +160,66 @@ def fetch_tpex_daily_table(target_date):
     except: pass
     return price_map
 
-# ✅ 智能整合邏輯
+# ✅ 引擎四 (NEW)：MIS 單兵狙擊 (專門對付漏網之魚)
+def fetch_mis_single_sniper(sid, mkt):
+    print(f"   🔫 啟動狙擊手模式：單獨抓取 {sid}...")
+    try:
+        # 先初始化 Session
+        session.get("https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw", timeout=3)
+        ts = int(time.time() * 1000)
+        # 單獨構造請求
+        url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={mkt}_{sid}.tw&json=1&delay=0&_={ts}"
+        headers = {'Referer': 'https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw'}
+        
+        res = session.get(url, headers=headers, verify=False, timeout=5)
+        js = res.json()
+        
+        if 'msgArray' in js:
+            for row in js['msgArray']:
+                price_str = row.get('z', '-')
+                y_str = row.get('y', '-')
+                vol_str = row.get('v', '0')
+                if price_str != '-':
+                    price_val = float(price_str); last_close = float(y_str)
+                    change_val = price_val - last_close; pct = (change_val / last_close) * 100
+                    return {'close': price_val, 'change': change_val, 'pct': pct, 'vol': vol_str}
+                elif y_str != '-':
+                    return {'close': float(y_str), 'change': 0.0, 'pct': 0.0, 'vol': vol_str}
+    except: pass
+    return None
+
+# ✅ 智能整合邏輯 (四重保險)
 def get_best_prices(targets, target_date):
-    print(f"🚀 啟動報價引擎 (優先: Yahoo API)...")
+    print(f"🚀 啟動報價引擎 (V10.95 狙擊手版)...")
     final_prices = {}
     
-    # 1. 先跑 Yahoo
+    # 1. 第一層：Yahoo API
     for t in targets:
         sid = t['id']
         data = fetch_yahoo_api_price(sid, t['mkt'])
         if data: final_prices[sid] = data
         else: print(f"   ⚠️ Yahoo 缺漏: {t['name']}({sid})")
 
-    # 2. 檢查是否有缺漏
-    missing_tse = False
-    missing_otc = False
-    for t in targets:
-        if t['id'] not in final_prices:
-            if t['mkt'] == 'tse': missing_tse = True
-            if t['mkt'] == 'otc': missing_otc = True
+    # 2. 檢查缺漏
+    missing_list = [t for t in targets if t['id'] not in final_prices]
     
-    # 3. 有缺上市 -> 下載證交所總表
-    if missing_tse:
-        twse_data = fetch_twse_daily_table(target_date)
-        for t in targets:
-            if t['id'] not in final_prices and t['mkt'] == 'tse' and t['id'] in twse_data:
-                final_prices[t['id']] = twse_data[t['id']]
-                print(f"   ✅ 證交所總表補位: {t['name']}")
-
-    # 4. 有缺上櫃 -> 下載櫃買總表 (五福應該會在這裡被抓到)
-    if missing_otc:
-        tpex_data = fetch_tpex_daily_table(target_date)
-        for t in targets:
-            if t['id'] not in final_prices and t['mkt'] == 'otc' and t['id'] in tpex_data:
-                final_prices[t['id']] = tpex_data[t['id']]
-                print(f"   ✅ 櫃買總表補位: {t['name']}")
+    if missing_list:
+        # 3. 第二層：官方總表 (批次補漏)
+        twse_data = {}; tpex_data = {}
+        if any(t['mkt'] == 'tse' for t in missing_list): twse_data = fetch_twse_daily_table(target_date)
+        if any(t['mkt'] == 'otc' for t in missing_list): tpex_data = fetch_tpex_daily_table(target_date)
+        
+        for t in missing_list:
+            if t['mkt'] == 'tse' and t['id'] in twse_data: final_prices[t['id']] = twse_data[t['id']]
+            elif t['mkt'] == 'otc' and t['id'] in tpex_data: final_prices[t['id']] = tpex_data[t['id']]
+    
+    # 4. 第三層：狙擊手模式 (針對還沒抓到的富強鑫)
+    still_missing = [t for t in targets if t['id'] not in final_prices]
+    for t in still_missing:
+        data = fetch_mis_single_sniper(t['id'], t['mkt'])
+        if data: 
+            final_prices[t['id']] = data
+            print(f"   🎯 狙擊手命中: {t['name']}")
 
     return final_prices
 
@@ -344,7 +366,7 @@ def check_one_stock(target, all_chips, all_prices, target_date_str):
     send_discord(f"📊 {sname} ({sid}) 戰報", msg, color)
 
 if __name__ == "__main__":
-    print("🚀 戰情室旗艦掃描器 V10.9 (智慧補漏網版) 啟動...")
+    print("🚀 戰情室旗艦掃描器 V10.95 (狙擊手補單版) 啟動...")
     target_date = get_target_date()
     target_date_str = target_date.strftime("%Y-%m-%d")
     all_chips_map = fetch_all_chips(target_date)
