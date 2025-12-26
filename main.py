@@ -3,6 +3,7 @@ import requests
 import time
 import json
 import urllib3
+import re
 from datetime import datetime, timedelta, timezone
 from bs4 import BeautifulSoup
 
@@ -12,12 +13,13 @@ DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
 session = requests.Session()
 session.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'application/json, text/javascript, */*; q=0.01',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
     'Connection': 'keep-alive'
 })
 
-# 🛑 2. 監控目標清單 (V10.95)
+# 🛑 2. 監控目標清單 (V11.0 終極版)
 TARGETS = [
     # --- 🔥 2026 1月生效 ---
     {"id": "6894", "name": "衛司特",   "date": "2026-01-13", "strategy": "STD", "threshold": 50,  "mkt": "otc"},
@@ -46,7 +48,7 @@ TARGETS = [
 def send_discord(title, msg, color=0x00ff00):
     if not DISCORD_WEBHOOK_URL: return
     data = {
-        "username": "CB 戰情室 (V10.95)",
+        "username": "CB 戰情室 (V11.0)",
         "embeds": [{
             "title": title,
             "description": msg,
@@ -80,7 +82,7 @@ def get_battle_phase(eff_date):
     elif days_diff == 0: return "PHASE_2", f"🔥 **D-Day：今日生效！**"
     else: return "PHASE_3", f"🚀 **後續追蹤：第 {abs(days_diff)} 天**"
 
-# ✅ 引擎一：Yahoo API
+# ✅ 1. Yahoo API
 def fetch_yahoo_api_price(sid, mkt):
     try:
         suffix = ".TW" if mkt == "tse" else ".TWO"
@@ -107,38 +109,37 @@ def fetch_yahoo_api_price(sid, mkt):
     except: pass
     return None
 
-# ✅ 引擎二：證交所總表
+# ✅ 2. 證交所總表 (修復：掃描所有表格，不 break)
 def fetch_twse_daily_table(target_date):
-    print("   🛡️ 啟動 [證交所] 官方總表下載...")
+    print("   🛡️ 啟動 [證交所] 官方總表 (全表掃描)...")
     price_map = {}
     date_str = target_date.strftime("%Y%m%d")
     try:
         url = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALLBUT0999&response=json"
         res = session.get(url, verify=False)
         js = res.json()
-        target_table = None
         if js['stat'] == 'OK':
+            # 關鍵修正：遍歷所有表格，不要找到第一個就停
             for table in js.get('tables', []):
-                if "收盤價" in table.get('fields', []): target_table = table; break
-            if target_table:
-                for row in target_table['data']:
-                    sid = row[0]
-                    try:
-                        if row[8] == '--': continue
-                        close = float(row[8].replace(',', ''))
-                        sign = -1 if "green" in row[9] or "-" in row[9] else 1
-                        diff = float(row[10].replace(',', '')) * sign
-                        vol = int(row[2].replace(',', '')) // 1000
-                        prev = close - diff
-                        pct = (diff / prev * 100) if prev != 0 else 0
-                        price_map[sid] = {'close': close, 'change': diff, 'pct': pct, 'vol': str(vol)}
-                    except: pass
+                if "收盤價" in table.get('fields', []): 
+                    for row in table['data']:
+                        sid = row[0]
+                        try:
+                            if row[8] == '--': continue
+                            close = float(row[8].replace(',', ''))
+                            sign = -1 if "green" in row[9] or "-" in row[9] else 1
+                            diff = float(row[10].replace(',', '')) * sign
+                            vol = int(row[2].replace(',', '')) // 1000
+                            prev = close - diff
+                            pct = (diff / prev * 100) if prev != 0 else 0
+                            price_map[sid] = {'close': close, 'change': diff, 'pct': pct, 'vol': str(vol)}
+                        except: pass
     except: pass
     return price_map
 
-# ✅ 引擎三：櫃買中心總表
+# ✅ 3. 櫃買中心總表
 def fetch_tpex_daily_table(target_date):
-    print("   🛡️ 啟動 [櫃買中心] 官方總表下載...")
+    print("   🛡️ 啟動 [櫃買中心] 官方總表...")
     price_map = {}
     date_str_ro = f"{target_date.year-1911}/{target_date.month:02d}/{target_date.day:02d}"
     try:
@@ -160,37 +161,47 @@ def fetch_tpex_daily_table(target_date):
     except: pass
     return price_map
 
-# ✅ 引擎四 (NEW)：MIS 單兵狙擊 (專門對付漏網之魚)
-def fetch_mis_single_sniper(sid, mkt):
-    print(f"   🔫 啟動狙擊手模式：單獨抓取 {sid}...")
+# ✅ 4. Goodinfo 網頁爬蟲 (核彈級救援)
+def fetch_goodinfo_scraper(sid):
+    print(f"   ☢️ 啟動 [Goodinfo] 核彈救援: {sid}...")
     try:
-        # 先初始化 Session
-        session.get("https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw", timeout=3)
-        ts = int(time.time() * 1000)
-        # 單獨構造請求
-        url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={mkt}_{sid}.tw&json=1&delay=0&_={ts}"
-        headers = {'Referer': 'https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw'}
+        url = f"https://goodinfo.tw/tw/StockDetail.jsp?STOCK_ID={sid}"
+        # Goodinfo 需要強力的 Headers 偽裝
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': 'https://goodinfo.tw/tw/StockDetail.jsp'
+        }
+        res = session.get(url, headers=headers, timeout=8)
+        res.encoding = 'utf-8'
+        soup = BeautifulSoup(res.text, 'html.parser')
         
-        res = session.get(url, headers=headers, verify=False, timeout=5)
-        js = res.json()
-        
-        if 'msgArray' in js:
-            for row in js['msgArray']:
-                price_str = row.get('z', '-')
-                y_str = row.get('y', '-')
-                vol_str = row.get('v', '0')
-                if price_str != '-':
-                    price_val = float(price_str); last_close = float(y_str)
-                    change_val = price_val - last_close; pct = (change_val / last_close) * 100
-                    return {'close': price_val, 'change': change_val, 'pct': pct, 'vol': vol_str}
-                elif y_str != '-':
-                    return {'close': float(y_str), 'change': 0.0, 'pct': 0.0, 'vol': vol_str}
-    except: pass
+        # 抓取成交價 (通常在第一個 big bold text)
+        # 尋找 <td bgcolor=white>...
+        # 這邊用比較通用的 table 結構抓
+        table = soup.find('table', {'class': 'b1 p4_2 r10'})
+        if table:
+            rows = table.find_all('tr')
+            # 通常成交價在第3行 (index 2)
+            data_row = rows[2]
+            cols = data_row.find_all('td')
+            price_val = float(cols[0].text.strip())
+            change_val = float(cols[1].text.strip())
+            pct_val = float(cols[2].text.replace('%','').strip())
+            
+            # 抓成交量
+            vol_row = rows[4]
+            vol_cols = vol_row.find_all('td')
+            vol_val = vol_cols[0].text.strip().replace(',', '') # 這裡是張數
+            
+            return {'close': price_val, 'change': change_val, 'pct': pct_val, 'vol': vol_val}
+            
+    except Exception as e:
+        print(f"   ⚠️ Goodinfo 失敗: {e}")
     return None
 
-# ✅ 智能整合邏輯 (四重保險)
+# ✅ 智能整合邏輯 (全網大搜查)
 def get_best_prices(targets, target_date):
-    print(f"🚀 啟動報價引擎 (V10.95 狙擊手版)...")
+    print(f"🚀 啟動 V11.0 報價引擎 (目標：抓出富強鑫)...")
     final_prices = {}
     
     # 1. 第一層：Yahoo API
@@ -198,14 +209,12 @@ def get_best_prices(targets, target_date):
         sid = t['id']
         data = fetch_yahoo_api_price(sid, t['mkt'])
         if data: final_prices[sid] = data
-        else: print(f"   ⚠️ Yahoo 缺漏: {t['name']}({sid})")
-
-    # 2. 檢查缺漏
-    missing_list = [t for t in targets if t['id'] not in final_prices]
     
+    # 2. 檢查缺漏，啟動第二層：官方總表
+    missing_list = [t for t in targets if t['id'] not in final_prices]
     if missing_list:
-        # 3. 第二層：官方總表 (批次補漏)
         twse_data = {}; tpex_data = {}
+        # 只有當有缺上市股時，才去下載 TWSE 大表
         if any(t['mkt'] == 'tse' for t in missing_list): twse_data = fetch_twse_daily_table(target_date)
         if any(t['mkt'] == 'otc' for t in missing_list): tpex_data = fetch_tpex_daily_table(target_date)
         
@@ -213,13 +222,13 @@ def get_best_prices(targets, target_date):
             if t['mkt'] == 'tse' and t['id'] in twse_data: final_prices[t['id']] = twse_data[t['id']]
             elif t['mkt'] == 'otc' and t['id'] in tpex_data: final_prices[t['id']] = tpex_data[t['id']]
     
-    # 4. 第三層：狙擊手模式 (針對還沒抓到的富強鑫)
+    # 3. 第三層：Goodinfo 救援 (針對還是抓不到的)
     still_missing = [t for t in targets if t['id'] not in final_prices]
     for t in still_missing:
-        data = fetch_mis_single_sniper(t['id'], t['mkt'])
+        data = fetch_goodinfo_scraper(t['id'])
         if data: 
             final_prices[t['id']] = data
-            print(f"   🎯 狙擊手命中: {t['name']}")
+            print(f"   🎉 Goodinfo 成功捕獲: {t['name']}")
 
     return final_prices
 
@@ -366,7 +375,7 @@ def check_one_stock(target, all_chips, all_prices, target_date_str):
     send_discord(f"📊 {sname} ({sid}) 戰報", msg, color)
 
 if __name__ == "__main__":
-    print("🚀 戰情室旗艦掃描器 V10.95 (狙擊手補單版) 啟動...")
+    print("🚀 戰情室旗艦掃描器 V11.0 (全網大搜查版) 啟動...")
     target_date = get_target_date()
     target_date_str = target_date.strftime("%Y-%m-%d")
     all_chips_map = fetch_all_chips(target_date)
