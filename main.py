@@ -26,14 +26,18 @@ session.headers.update({
     'Connection': 'keep-alive'
 })
 
-# 🛑 2. 監控目標清單 (V9.6 新增穎崴)
+# 🛑 2. 監控目標清單 (V10.0 新增衛司特)
 TARGETS = [
-    # --- 2026 1月生效主力 (超級星期四 1/9) ---
-    {"id": "6515", "name": "穎崴",     "date": "2026-01-09", "strategy": "STD", "threshold": 50},  # NEW! 2500元高價股，門檻50張(=1.3億)
+    # --- 🔥 2026 1月生效 (重點戰區) ---
+    {"id": "6894", "name": "衛司特",   "date": "2026-01-13", "strategy": "STD", "threshold": 50},   # NEW! 3億極致鎖碼/ESG煉金
+    {"id": "6913", "name": "鴻呈",     "date": "2026-01-13", "strategy": "STD", "threshold": 100},  # 4.5億爆發型
+    {"id": "2324", "name": "仁寶",     "date": "2026-01-12", "strategy": "ECB", "threshold": 1000}, # 核彈級ECB
+    {"id": "3587", "name": "閎康",     "date": "2026-01-12", "strategy": "STD", "threshold": 150},  # 檢測精品
+    {"id": "6515", "name": "穎崴",     "date": "2026-01-09", "strategy": "STD", "threshold": 50},   # 千金股
     {"id": "2329", "name": "華泰",     "date": "2026-01-09", "strategy": "STD", "threshold": 500},
     {"id": "4923", "name": "力士",     "date": "2026-01-09", "strategy": "STD", "threshold": 100},
 
-    # --- 1月其他 ---
+    # --- 1月初生效 ---
     {"id": "2376", "name": "技嘉",     "date": "2026-01-02", "strategy": "ECB", "threshold": 500},
     {"id": "2455", "name": "全新",     "date": "2026-01-02", "strategy": "STD", "threshold": 200},
     {"id": "4714", "name": "永捷",     "date": "2026-01-16", "strategy": "STD", "threshold": 100},
@@ -51,7 +55,7 @@ TARGETS = [
 def send_discord(title, msg, color=0x00ff00):
     if not DISCORD_WEBHOOK_URL: return
     data = {
-        "username": "CB 戰情室 (V9.6)",
+        "username": "CB 戰情室 (V10.0)",
         "embeds": [{
             "title": title,
             "description": msg,
@@ -299,7 +303,7 @@ def check_one_stock(target, all_chips, all_prices, target_date_str):
     send_discord(f"📊 {sname} ({sid}) 戰報", msg, color)
 
 if __name__ == "__main__":
-    print("🚀 戰情室旗艦掃描器 V9.6 (AI千金股加入版) 啟動...")
+    print("🚀 戰情室旗艦掃描器 V10.0 (ESG煉金術版) 啟動...")
     target_date = get_target_date()
     target_date_str = target_date.strftime("%Y-%m-%d")
     
